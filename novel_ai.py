@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import os
+import re
 import sys
 from pathlib import Path
 from typing import Any, Callable
@@ -10,17 +11,24 @@ from typing import Any, Callable
 # Configuration
 # ============================================================
 
-MEMORY_DIR = Path.home() / "writing"
+WRITING_DIR = Path.home() / "writing"
+MEMORY_DIR = WRITING_DIR
 MEMORY_FILES = {
     "context": MEMORY_DIR / "context.txt",
     "world": MEMORY_DIR / "world.txt",
     "ideas": MEMORY_DIR / "ideas.txt",
     "timeline": MEMORY_DIR / "timeline.txt",
 }
+NOVEL_PROJECT_DIR = WRITING_DIR / "novel_project"
+PROJECT_MEMORY_DIR = NOVEL_PROJECT_DIR / "memory"
+CHAPTERS_DIR = NOVEL_PROJECT_DIR / "chapters"
+CONTINUITY_REPORTS_DIR = NOVEL_PROJECT_DIR / "analysis" / "continuity_reports"
+CHAPTER_FILENAME_PATTERN = re.compile(r"chapter_(\d+)\.txt$")
 
 MODEL_NAME = os.getenv("OPENAI_MODEL", "gpt-4.1-mini")
 MAIN_TEMPERATURE = 0.8
 SCENE_TEMPERATURE = 0.2
+CONTINUITY_TEMPERATURE = 0.0
 
 MAIN_SYSTEM_PROMPT = """You are a thoughtful AI novel-writing assistant.
 Help the user think through story ideas, scenes, structure, tone, character, and prose.
@@ -62,6 +70,36 @@ Rules:
 - None
 """
 
+CONTINUITY_SYSTEM_PROMPT = """You are a strict continuity editor for a novel project.
+
+Your task is to compare canon memory, previous chapters, and the selected chapter.
+Return ONLY factual continuity issues.
+
+Allowed issue types:
+- injuries disappearing or changing without explanation
+- characters appearing in incorrect locations
+- timeline contradictions
+- broken world rules
+- object continuity errors
+- relationship inconsistencies
+- knowledge inconsistencies
+
+Rules:
+- Do not give writing advice.
+- Do not rewrite any text.
+- Do not praise the writing.
+- Do not mention style, pacing, tone, or quality.
+- Do not speculate beyond the provided material.
+- If there are no continuity issues, say exactly: "No factual continuity issues found."
+
+Return output in this exact structure:
+
+CONTINUITY REPORT
+
+- Issue 1
+- Issue 2
+"""
+
 
 # ============================================================
 # Memory helpers
@@ -92,6 +130,18 @@ def load_memory_block() -> str:
     return "\n\n".join(sections)
 
 
+def load_project_memory_block() -> str:
+    """Combine all novel project memory files into one continuity block."""
+    memory_paths = sorted(
+        path for path in PROJECT_MEMORY_DIR.iterdir() if path.is_file()
+    )
+    sections = []
+    for path in memory_paths:
+        title = path.stem.replace("_", " ").title()
+        sections.append(f"{title}:\n{read_memory_file(path)}")
+    return "\n\n".join(sections) if sections else "(no memory files found)"
+
+
 
 def append_memory_fact(memory_key: str, fact: str) -> None:
     """Append one fact to the chosen memory file."""
@@ -105,6 +155,36 @@ def append_memory_fact(memory_key: str, fact: str) -> None:
         file.write(cleaned_fact + "\n")
 
     print(f"Saved to {path}.")
+
+
+def extract_chapter_number(path: Path) -> int | None:
+    """Return the chapter number from a chapter filename."""
+    match = CHAPTER_FILENAME_PATTERN.fullmatch(path.name)
+    if match is None:
+        return None
+    return int(match.group(1))
+
+
+def load_sorted_chapter_paths() -> list[Path]:
+    """Return project chapter files sorted numerically."""
+    chapter_paths = []
+    for path in CHAPTERS_DIR.iterdir():
+        if not path.is_file():
+            continue
+        chapter_number = extract_chapter_number(path)
+        if chapter_number is None:
+            continue
+        chapter_paths.append((chapter_number, path))
+    chapter_paths.sort(key=lambda item: item[0])
+    return [path for _, path in chapter_paths]
+
+
+def format_chapter_block(chapter_paths: list[Path]) -> str:
+    """Read chapter files into one labeled text block."""
+    sections = []
+    for path in chapter_paths:
+        sections.append(f"{path.name}:\n{path.read_text(encoding='utf-8').strip()}")
+    return "\n\n".join(sections) if sections else "(none)"
 
 
 # ============================================================
@@ -213,6 +293,29 @@ def build_scene_messages(scene_text: str) -> list[dict[str, str]]:
     ]
 
 
+def build_continuity_messages(
+    memory_block: str,
+    previous_chapters_block: str,
+    selected_chapter_name: str,
+    selected_chapter_text: str,
+) -> list[dict[str, str]]:
+    """Build the isolated message list for continuity checking."""
+    return [
+        {
+            "role": "system",
+            "content": CONTINUITY_SYSTEM_PROMPT,
+        },
+        {
+            "role": "user",
+            "content": (
+                f"Canon memory:\n\n{memory_block}\n\n"
+                f"Previous chapters:\n\n{previous_chapters_block}\n\n"
+                f"Selected chapter ({selected_chapter_name}):\n\n{selected_chapter_text}"
+            ),
+        },
+    ]
+
+
 # ============================================================
 # Command handlers
 # ============================================================
@@ -250,6 +353,72 @@ def handle_scene_summary(client: Any) -> None:
     print(result)
 
 
+def handle_continuity_check(client: Any) -> None:
+    """Run a continuity report in a fully isolated request."""
+    print("Enter chapter filename:")
+    try:
+        selected_name = input("> ").strip()
+    except EOFError:
+        print()
+        return
+
+    if not selected_name:
+        print("No chapter filename entered.")
+        return
+
+    if not PROJECT_MEMORY_DIR.exists():
+        print(f"Missing memory directory: {PROJECT_MEMORY_DIR}")
+        return
+
+    if not CHAPTERS_DIR.exists():
+        print(f"Missing chapters directory: {CHAPTERS_DIR}")
+        return
+
+    chapter_paths = load_sorted_chapter_paths()
+    selected_path = CHAPTERS_DIR / selected_name
+
+    if selected_path not in chapter_paths:
+        print("Chapter not found.")
+        return
+
+    selected_number = extract_chapter_number(selected_path)
+    if selected_number is None:
+        print("Invalid chapter filename format.")
+        return
+
+    previous_paths = [
+        path
+        for path in chapter_paths
+        if extract_chapter_number(path) is not None
+        and extract_chapter_number(path) < selected_number
+    ]
+
+    memory_block = load_project_memory_block()
+    previous_chapters_block = format_chapter_block(previous_paths)
+    selected_chapter_text = selected_path.read_text(encoding="utf-8").strip()
+    messages = build_continuity_messages(
+        memory_block=memory_block,
+        previous_chapters_block=previous_chapters_block,
+        selected_chapter_name=selected_path.name,
+        selected_chapter_text=selected_chapter_text,
+    )
+
+    try:
+        report = request_chat_completion(
+            client=client,
+            messages=messages,
+            temperature=CONTINUITY_TEMPERATURE,
+        )
+    except Exception as exc:  # Keep terminal app stable for the user.
+        print(f"Continuity check failed: {exc}")
+        return
+
+    CONTINUITY_REPORTS_DIR.mkdir(parents=True, exist_ok=True)
+    report_path = CONTINUITY_REPORTS_DIR / f"{selected_path.stem}_report.txt"
+    report_path.write_text(report + "\n", encoding="utf-8")
+    print("Continuity report saved.")
+
+
 # ============================================================
 # Main application loop
 # ============================================================
@@ -267,6 +436,7 @@ def print_help() -> None:
     """Show available commands."""
     print("Available commands:")
     print("  /scene-summary")
+    print("  /continuity-check")
     print("  /save-context")
     print("  /save-world")
     print("  /save-idea")
@@ -290,6 +460,7 @@ def main() -> None:
 
     command_handlers: dict[str, Callable[[], None]] = {
         "/scene-summary": lambda: handle_scene_summary(client),
+        "/continuity-check": lambda: handle_continuity_check(client),
         "/save-context": lambda: handle_save_command("context"),
         "/save-world": lambda: handle_save_command("world"),
         "/save-idea": lambda: handle_save_command("ideas"),
