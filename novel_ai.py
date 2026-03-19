@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import os
 import re
-import sys
 from pathlib import Path
 from typing import Any, Callable
 
@@ -12,18 +11,20 @@ from typing import Any, Callable
 # ============================================================
 
 WRITING_DIR = Path.home() / "writing"
-MEMORY_DIR = WRITING_DIR
+NOVEL_AI_SCRIPT_PATH = WRITING_DIR / "ai" / "novel_ai" / "novel_ai.py"
+NOVEL_PROJECT_DIR = WRITING_DIR / "novel_project"
+MEMORY_DIR = NOVEL_PROJECT_DIR / "memory"
+CHAPTERS_DIR = NOVEL_PROJECT_DIR / "chapters"
+CONTINUITY_REPORTS_DIR = NOVEL_PROJECT_DIR / "analysis" / "continuity_reports"
+SCENE_SUMMARIES_PATH = MEMORY_DIR / "scene_summaries.txt"
+CHAPTER_FILENAME_PATTERN = re.compile(r"chapter_(\d+)\.txt$")
+
 MEMORY_FILES = {
     "context": MEMORY_DIR / "context.txt",
     "world": MEMORY_DIR / "world.txt",
     "ideas": MEMORY_DIR / "ideas.txt",
     "timeline": MEMORY_DIR / "timeline.txt",
 }
-NOVEL_PROJECT_DIR = WRITING_DIR / "novel_project"
-PROJECT_MEMORY_DIR = NOVEL_PROJECT_DIR / "memory"
-CHAPTERS_DIR = NOVEL_PROJECT_DIR / "chapters"
-CONTINUITY_REPORTS_DIR = NOVEL_PROJECT_DIR / "analysis" / "continuity_reports"
-CHAPTER_FILENAME_PATTERN = re.compile(r"chapter_(\d+)\.txt$")
 
 MODEL_NAME = os.getenv("OPENAI_MODEL", "gpt-4.1-mini")
 MAIN_TEMPERATURE = 0.8
@@ -102,49 +103,41 @@ CONTINUITY REPORT
 
 
 # ============================================================
-# Memory helpers
+# Filesystem helpers
 # ============================================================
 
 
-def ensure_memory_files() -> None:
-    """Create the memory folder and files if they do not already exist."""
+def ensure_project_files() -> None:
+    """Create the expected project folders and files if they do not already exist."""
     MEMORY_DIR.mkdir(parents=True, exist_ok=True)
+    CONTINUITY_REPORTS_DIR.mkdir(parents=True, exist_ok=True)
+
     for path in MEMORY_FILES.values():
         path.touch(exist_ok=True)
 
+    SCENE_SUMMARIES_PATH.touch(exist_ok=True)
 
 
-def read_memory_file(path: Path) -> str:
-    """Read a memory file and return cleaned text."""
+
+def read_text_file(path: Path) -> str:
+    """Read a text file and return cleaned text."""
     text = path.read_text(encoding="utf-8").strip()
     return text if text else "(empty)"
 
 
 
 def load_memory_block() -> str:
-    """Combine all memory files into one block for the main chat assistant."""
+    """Load canonical continuity memory for the main assistant."""
     sections = []
     for name, path in MEMORY_FILES.items():
         title = name.capitalize()
-        sections.append(f"{title}:\n{read_memory_file(path)}")
+        sections.append(f"{title}:\n{read_text_file(path)}")
     return "\n\n".join(sections)
-
-
-def load_project_memory_block() -> str:
-    """Combine all novel project memory files into one continuity block."""
-    memory_paths = sorted(
-        path for path in PROJECT_MEMORY_DIR.iterdir() if path.is_file()
-    )
-    sections = []
-    for path in memory_paths:
-        title = path.stem.replace("_", " ").title()
-        sections.append(f"{title}:\n{read_memory_file(path)}")
-    return "\n\n".join(sections) if sections else "(no memory files found)"
 
 
 
 def append_memory_fact(memory_key: str, fact: str) -> None:
-    """Append one fact to the chosen memory file."""
+    """Append one fact to the chosen canonical memory file."""
     cleaned_fact = fact.strip()
     if not cleaned_fact:
         print("Nothing saved.")
@@ -157,12 +150,27 @@ def append_memory_fact(memory_key: str, fact: str) -> None:
     print(f"Saved to {path}.")
 
 
+
+def append_scene_summary(summary_text: str) -> None:
+    """Append scene extraction output to the non-canonical storage log."""
+    cleaned_summary = summary_text.strip()
+    if not cleaned_summary:
+        return
+
+    with SCENE_SUMMARIES_PATH.open("a", encoding="utf-8") as file:
+        if SCENE_SUMMARIES_PATH.stat().st_size > 0:
+            file.write("\n\n" + ("-" * 40) + "\n\n")
+        file.write(cleaned_summary + "\n")
+
+
+
 def extract_chapter_number(path: Path) -> int | None:
     """Return the chapter number from a chapter filename."""
     match = CHAPTER_FILENAME_PATTERN.fullmatch(path.name)
     if match is None:
         return None
     return int(match.group(1))
+
 
 
 def load_sorted_chapter_paths() -> list[Path]:
@@ -177,6 +185,7 @@ def load_sorted_chapter_paths() -> list[Path]:
         chapter_paths.append((chapter_number, path))
     chapter_paths.sort(key=lambda item: item[0])
     return [path for _, path in chapter_paths]
+
 
 
 def format_chapter_block(chapter_paths: list[Path]) -> str:
@@ -293,6 +302,7 @@ def build_scene_messages(scene_text: str) -> list[dict[str, str]]:
     ]
 
 
+
 def build_continuity_messages(
     memory_block: str,
     previous_chapters_block: str,
@@ -330,7 +340,7 @@ def handle_save_command(memory_key: str) -> None:
 
 def handle_scene_summary(client: Any) -> None:
     """Run scene extraction in a fully isolated request."""
-    print('Paste scene. Type END on a new line when finished.')
+    print("Paste scene. Type END on a new line when finished.")
     scene_text = collect_multiline_input(end_marker="END")
 
     if not scene_text:
@@ -349,8 +359,18 @@ def handle_scene_summary(client: Any) -> None:
         print(f"Scene extraction failed: {exc}")
         return
 
+    try:
+        append_scene_summary(result)
+    except OSError as exc:
+        print(f"Scene summary generated, but could not save log: {exc}")
+        print()
+        print(result)
+        return
+
     print()
     print(result)
+    print(f"\nScene summary log saved to {SCENE_SUMMARIES_PATH}.")
+
 
 
 def handle_continuity_check(client: Any) -> None:
@@ -366,8 +386,8 @@ def handle_continuity_check(client: Any) -> None:
         print("No chapter filename entered.")
         return
 
-    if not PROJECT_MEMORY_DIR.exists():
-        print(f"Missing memory directory: {PROJECT_MEMORY_DIR}")
+    if not MEMORY_DIR.exists():
+        print(f"Missing memory directory: {MEMORY_DIR}")
         return
 
     if not CHAPTERS_DIR.exists():
@@ -393,7 +413,7 @@ def handle_continuity_check(client: Any) -> None:
         and extract_chapter_number(path) < selected_number
     ]
 
-    memory_block = load_project_memory_block()
+    memory_block = load_memory_block()
     previous_chapters_block = format_chapter_block(previous_paths)
     selected_chapter_text = selected_path.read_text(encoding="utf-8").strip()
     messages = build_continuity_messages(
@@ -413,10 +433,14 @@ def handle_continuity_check(client: Any) -> None:
         print(f"Continuity check failed: {exc}")
         return
 
-    CONTINUITY_REPORTS_DIR.mkdir(parents=True, exist_ok=True)
     report_path = CONTINUITY_REPORTS_DIR / f"{selected_path.stem}_report.txt"
-    report_path.write_text(report + "\n", encoding="utf-8")
-    print("Continuity report saved.")
+    try:
+        report_path.write_text(report + "\n", encoding="utf-8")
+    except OSError as exc:
+        print(f"Continuity report could not be saved: {exc}")
+        return
+
+    print(f"Continuity report saved to {report_path}.")
 
 
 # ============================================================
@@ -428,6 +452,8 @@ def print_welcome() -> None:
     """Show a simple startup message."""
     print("Novel AI Assistant")
     print(f"Model: {MODEL_NAME}")
+    print(f"Script path: {NOVEL_AI_SCRIPT_PATH}")
+    print(f"Project path: {NOVEL_PROJECT_DIR}")
     print("Type /help for commands or type exit to quit.")
 
 
@@ -448,7 +474,7 @@ def print_help() -> None:
 
 def main() -> None:
     """Run the terminal assistant."""
-    ensure_memory_files()
+    ensure_project_files()
 
     try:
         client = create_client()
