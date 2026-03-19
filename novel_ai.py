@@ -13,17 +13,18 @@ from typing import Any, Callable
 WRITING_DIR = Path.home() / "writing"
 NOVEL_AI_SCRIPT_PATH = WRITING_DIR / "ai" / "novel_ai" / "novel_ai.py"
 NOVEL_PROJECT_DIR = WRITING_DIR / "novel_project"
-MEMORY_DIR = NOVEL_PROJECT_DIR / "memory"
+PROJECT_MEMORY_DIR = NOVEL_PROJECT_DIR / "memory"
+PROJECT_ANALYSIS_DIR = NOVEL_PROJECT_DIR / "analysis"
 CHAPTERS_DIR = NOVEL_PROJECT_DIR / "chapters"
-CONTINUITY_REPORTS_DIR = NOVEL_PROJECT_DIR / "analysis" / "continuity_reports"
-SCENE_SUMMARIES_PATH = MEMORY_DIR / "scene_summaries.txt"
+CONTINUITY_REPORTS_DIR = PROJECT_ANALYSIS_DIR / "continuity_reports"
+SCENE_SUMMARIES_PATH = PROJECT_MEMORY_DIR / "scene_summaries.txt"
 CHAPTER_FILENAME_PATTERN = re.compile(r"chapter_(\d+)\.txt$")
 
 MEMORY_FILES = {
-    "context": MEMORY_DIR / "context.txt",
-    "world": MEMORY_DIR / "world.txt",
-    "ideas": MEMORY_DIR / "ideas.txt",
-    "timeline": MEMORY_DIR / "timeline.txt",
+    "context": PROJECT_MEMORY_DIR / "context.txt",
+    "world": PROJECT_MEMORY_DIR / "world.txt",
+    "ideas": PROJECT_MEMORY_DIR / "ideas.txt",
+    "timeline": PROJECT_MEMORY_DIR / "timeline.txt",
 }
 
 MODEL_NAME = os.getenv("OPENAI_MODEL", "gpt-4.1-mini")
@@ -109,7 +110,7 @@ CONTINUITY REPORT
 
 def ensure_project_files() -> None:
     """Create the expected project folders and files if they do not already exist."""
-    MEMORY_DIR.mkdir(parents=True, exist_ok=True)
+    PROJECT_MEMORY_DIR.mkdir(parents=True, exist_ok=True)
     CONTINUITY_REPORTS_DIR.mkdir(parents=True, exist_ok=True)
 
     for path in MEMORY_FILES.values():
@@ -138,6 +139,7 @@ def load_memory_block() -> str:
 
 def append_memory_fact(memory_key: str, fact: str) -> None:
     """Append one fact to the chosen canonical memory file."""
+    ensure_project_files()
     cleaned_fact = fact.strip()
     if not cleaned_fact:
         print("Nothing saved.")
@@ -153,6 +155,7 @@ def append_memory_fact(memory_key: str, fact: str) -> None:
 
 def append_scene_summary(summary_text: str) -> None:
     """Append scene extraction output to the non-canonical storage log."""
+    ensure_project_files()
     cleaned_summary = summary_text.strip()
     if not cleaned_summary:
         return
@@ -375,6 +378,7 @@ def handle_scene_summary(client: Any) -> None:
 
 def handle_continuity_check(client: Any) -> None:
     """Run a continuity report in a fully isolated request."""
+    ensure_project_files()
     print("Enter chapter filename:")
     try:
         selected_name = input("> ").strip()
@@ -384,10 +388,6 @@ def handle_continuity_check(client: Any) -> None:
 
     if not selected_name:
         print("No chapter filename entered.")
-        return
-
-    if not MEMORY_DIR.exists():
-        print(f"Missing memory directory: {MEMORY_DIR}")
         return
 
     if not CHAPTERS_DIR.exists():
