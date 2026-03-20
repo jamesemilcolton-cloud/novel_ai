@@ -17,7 +17,6 @@ PROJECT_MEMORY_DIR = NOVEL_PROJECT_DIR / "memory"
 PROJECT_ANALYSIS_DIR = NOVEL_PROJECT_DIR / "analysis"
 CHAPTERS_DIR = NOVEL_PROJECT_DIR / "chapters"
 CONTINUITY_REPORTS_DIR = PROJECT_ANALYSIS_DIR / "continuity_reports"
-SCENE_SUMMARIES_PATH = PROJECT_MEMORY_DIR / "scene_summaries.txt"
 CHAPTER_FILENAME_PATTERN = re.compile(r"chapter_(\d+)\.txt$")
 
 MEMORY_FILES = {
@@ -29,7 +28,7 @@ MEMORY_FILES = {
 
 MODEL_NAME = os.getenv("OPENAI_MODEL", "gpt-4.1-mini")
 MAIN_TEMPERATURE = 0.8
-SCENE_TEMPERATURE = 0.2
+SCENE_TEMPERATURE = 0.1
 CONTINUITY_TEMPERATURE = 0.0
 
 MAIN_SYSTEM_PROMPT = """You are a thoughtful AI novel-writing assistant.
@@ -39,22 +38,38 @@ Be creative, clear, and practical.
 Do not invent persistent facts unless the user states them.
 """
 
-SCENE_SYSTEM_PROMPT = """You are a concise scene summariser for a novel-writing project.
+SCENE_SYSTEM_PROMPT = """You are a strict isolated analysis tool for a novel-writing project.
 
-Your job is to read ONLY the scene text provided in this one request and produce a short summary.
+Your job is to read ONLY the pasted scene text from this one request and extract possible long-term memory items.
 Do not give writing advice.
 Do not critique the scene.
-Do not rewrite or expand the scene.
-Do not add new events, motives, details, or emotions that are not plainly present.
-Do not refer to chat history, persona, or prior memory.
+Do not rewrite the scene.
+Do not summarize previous outputs.
+Do not refer to any chat history, persona, or prior memory.
+Use ONLY the current scene provided by the user in this one request.
+
+Return output in this exact structure:
+
+### MEMORY SUGGESTIONS
+
+Context:
+- ...
+
+Timeline:
+- ...
+
+World:
+- ...
+
+Ideas:
+- ...
 
 Rules:
-- Return only the summary text.
-- Keep it short: one sentence if possible, maximum two short sentences.
-- Prefer 8 to 20 words when the input is brief.
-- Focus only on the key event or change.
-- Use plain, direct language.
-- If the user input is already very short, compress it rather than embellishing it.
+- Include only concrete memory candidates or clearly labeled story ideas.
+- Keep each bullet short and specific.
+- If a section has nothing useful, write:
+- None
+- Return ONLY the structured MEMORY SUGGESTIONS output.
 """
 
 CONTINUITY_SYSTEM_PROMPT = """You are a strict continuity editor for a novel project.
@@ -101,7 +116,6 @@ def ensure_project_files() -> None:
     for path in MEMORY_FILES.values():
         path.touch(exist_ok=True)
 
-    SCENE_SUMMARIES_PATH.touch(exist_ok=True)
 
 
 
@@ -135,20 +149,6 @@ def append_memory_fact(memory_key: str, fact: str) -> None:
         file.write(cleaned_fact + "\n")
 
     print(f"Saved to {path}.")
-
-
-
-def append_scene_summary(summary_text: str) -> None:
-    """Append scene summary output to the non-canonical storage log."""
-    ensure_project_files()
-    cleaned_summary = summary_text.strip()
-    if not cleaned_summary:
-        return
-
-    with SCENE_SUMMARIES_PATH.open("a", encoding="utf-8") as file:
-        if SCENE_SUMMARIES_PATH.stat().st_size > 0:
-            file.write("\n\n" + ("-" * 40) + "\n\n")
-        file.write(cleaned_summary + "\n")
 
 
 
@@ -205,16 +205,6 @@ def collect_multiline_input(end_marker: str = "END") -> str:
 
     return "\n".join(lines).strip()
 
-
-
-def prompt_for_scene_summary() -> str:
-    """Ask the user for the scene text to summarise."""
-    print("Enter scene to summarise:")
-    try:
-        return input("> ")
-    except EOFError:
-        print()
-        return ""
 
 
 def prompt_for_fact() -> str:
@@ -287,7 +277,7 @@ def build_main_messages(
 
 
 def build_scene_messages(scene_text: str) -> list[dict[str, str]]:
-    """Build the isolated message list for scene summarisation."""
+    """Build the isolated message list for scene analysis."""
     return [
         {
             "role": "system",
@@ -295,7 +285,7 @@ def build_scene_messages(scene_text: str) -> list[dict[str, str]]:
         },
         {
             "role": "user",
-            "content": f"Scene to summarise concisely:\n\n{scene_text}",
+            "content": scene_text,
         },
     ]
 
@@ -337,8 +327,9 @@ def handle_save_command(memory_key: str) -> None:
 
 
 def handle_scene_summary(client: Any) -> None:
-    """Summarise one user-provided scene description in an isolated request."""
-    scene_text = prompt_for_scene_summary()
+    """Analyse one pasted scene in a fully isolated request."""
+    print("Enter scene to analyse. Type END on a new line when finished:")
+    scene_text = collect_multiline_input(end_marker="END")
 
     if not scene_text:
         print("No scene entered.")
@@ -356,17 +347,8 @@ def handle_scene_summary(client: Any) -> None:
         print(f"Scene summary failed: {exc}")
         return
 
-    try:
-        append_scene_summary(result)
-    except OSError as exc:
-        print(f"Scene summary generated, but could not save log: {exc}")
-        print()
-        print(result)
-        return
-
     print()
     print(result)
-    print(f"\nScene summary log saved to {SCENE_SUMMARIES_PATH}.")
 
 
 
