@@ -39,37 +39,22 @@ Be creative, clear, and practical.
 Do not invent persistent facts unless the user states them.
 """
 
-SCENE_SYSTEM_PROMPT = """You are a memory extraction tool for a novel-writing project.
+SCENE_SYSTEM_PROMPT = """You are a concise scene summariser for a novel-writing project.
 
-Your job is to read ONLY the pasted scene and extract possible long-term memory items.
+Your job is to read ONLY the scene text provided in this one request and produce a short summary.
 Do not give writing advice.
 Do not critique the scene.
-Do not rewrite the scene.
-Do not summarize previous outputs.
-Do not refer to any chat history, persona, or prior memory.
-Use ONLY the current scene provided by the user in this one request.
-
-Return output in this exact structure:
-
-### MEMORY SUGGESTIONS
-
-Context:
-- ...
-
-Timeline:
-- ...
-
-World:
-- ...
-
-Ideas:
-- ...
+Do not rewrite or expand the scene.
+Do not add new events, motives, details, or emotions that are not plainly present.
+Do not refer to chat history, persona, or prior memory.
 
 Rules:
-- Include only concrete memory candidates or clearly labeled story ideas.
-- Keep each bullet short and specific.
-- If a section has nothing useful, write:
-- None
+- Return only the summary text.
+- Keep it short: one sentence if possible, maximum two short sentences.
+- Prefer 8 to 20 words when the input is brief.
+- Focus only on the key event or change.
+- Use plain, direct language.
+- If the user input is already very short, compress it rather than embellishing it.
 """
 
 CONTINUITY_SYSTEM_PROMPT = """You are a strict continuity editor for a novel project.
@@ -154,7 +139,7 @@ def append_memory_fact(memory_key: str, fact: str) -> None:
 
 
 def append_scene_summary(summary_text: str) -> None:
-    """Append scene extraction output to the non-canonical storage log."""
+    """Append scene summary output to the non-canonical storage log."""
     ensure_project_files()
     cleaned_summary = summary_text.strip()
     if not cleaned_summary:
@@ -220,6 +205,16 @@ def collect_multiline_input(end_marker: str = "END") -> str:
 
     return "\n".join(lines).strip()
 
+
+
+def prompt_for_scene_summary() -> str:
+    """Ask the user for the scene text to summarise."""
+    print("Enter scene to summarise:")
+    try:
+        return input("> ")
+    except EOFError:
+        print()
+        return ""
 
 
 def prompt_for_fact() -> str:
@@ -292,7 +287,7 @@ def build_main_messages(
 
 
 def build_scene_messages(scene_text: str) -> list[dict[str, str]]:
-    """Build the isolated message list for scene memory extraction."""
+    """Build the isolated message list for scene summarisation."""
     return [
         {
             "role": "system",
@@ -300,7 +295,7 @@ def build_scene_messages(scene_text: str) -> list[dict[str, str]]:
         },
         {
             "role": "user",
-            "content": f"Scene to analyse for memory suggestions only:\n\n{scene_text}",
+            "content": f"Scene to summarise concisely:\n\n{scene_text}",
         },
     ]
 
@@ -342,9 +337,8 @@ def handle_save_command(memory_key: str) -> None:
 
 
 def handle_scene_summary(client: Any) -> None:
-    """Run scene extraction in a fully isolated request."""
-    print("Enter scene to summarise. Type END on a new line when finished:")
-    scene_text = collect_multiline_input(end_marker="END")
+    """Summarise one user-provided scene description in an isolated request."""
+    scene_text = prompt_for_scene_summary()
 
     if not scene_text:
         print("No scene entered.")
@@ -359,7 +353,7 @@ def handle_scene_summary(client: Any) -> None:
             temperature=SCENE_TEMPERATURE,
         )
     except Exception as exc:  # Keep terminal app stable for the user.
-        print(f"Scene extraction failed: {exc}")
+        print(f"Scene summary failed: {exc}")
         return
 
     try:
