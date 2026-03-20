@@ -343,7 +343,7 @@ def handle_save_command(memory_key: str) -> None:
 
 def handle_scene_summary(client: Any) -> None:
     """Run scene extraction in a fully isolated request."""
-    print("Paste scene. Type END on a new line when finished.")
+    print("Enter scene to summarise. Type END on a new line when finished:")
     scene_text = collect_multiline_input(end_marker="END")
 
     if not scene_text:
@@ -514,15 +514,8 @@ def main() -> None:
             print("Goodbye.")
             break
 
-        user_input_handled = False
         if user_input in command_handlers:
             command_handlers[user_input]()
-            user_input_handled = True
-
-        if user_input_handled:
-            continue
-
-        if not user_input:
             continue
 
         memory_block = load_memory_block()
