@@ -442,6 +442,9 @@ def handle_continuity_check(client: Any) -> None:
         print(f"Continuity report could not be saved: {exc}")
         return
 
+    print()
+    print(report)
+    print()
     print(f"Continuity report saved to {report_path}.")
 
 
