@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import os
 import re
+from collections import OrderedDict
 from pathlib import Path
 from typing import Any, Callable
 
@@ -17,15 +18,15 @@ PROJECT_MEMORY_DIR = NOVEL_PROJECT_DIR / "memory"
 PROJECT_ANALYSIS_DIR = NOVEL_PROJECT_DIR / "analysis"
 CHAPTERS_DIR = NOVEL_PROJECT_DIR / "chapters"
 CONTINUITY_REPORTS_DIR = PROJECT_ANALYSIS_DIR / "continuity_reports"
+CANON_MEMORY_PATH = PROJECT_MEMORY_DIR / "canon_memory.txt"
 SCENE_SUMMARIES_PATH = PROJECT_MEMORY_DIR / "scene_summaries.txt"
 CHAPTER_FILENAME_PATTERN = re.compile(r"chapter_(\d+)\.txt$")
-
-MEMORY_FILES = {
-    "context": PROJECT_MEMORY_DIR / "context.txt",
-    "world": PROJECT_MEMORY_DIR / "world.txt",
-    "ideas": PROJECT_MEMORY_DIR / "ideas.txt",
-    "timeline": PROJECT_MEMORY_DIR / "timeline.txt",
-}
+SUGGESTION_PATTERN = re.compile(
+    r"^\s*(\d+)\.\s*(.+?)\s*(?:→|->)\s*\[([^\]]+)\]\s*$",
+    re.MULTILINE,
+)
+CHAPTER_HEADER_PATTERN = re.compile(r"^CHAPTER\s+(\d+)\s*$")
+CATEGORY_HEADER_PATTERN = re.compile(r"^\[(.+)\]\s*$")
 
 MODEL_NAME = os.getenv("OPENAI_MODEL", "gpt-4.1-mini")
 MAIN_TEMPERATURE = 0.8
@@ -39,9 +40,9 @@ Be creative, clear, and practical.
 Do not invent persistent facts unless the user states them.
 """
 
-SCENE_SYSTEM_PROMPT = """You are a strict isolated analysis tool for a novel-writing project.
+SCENE_SYSTEM_PROMPT = """You are a strict isolated extraction tool for a novel-writing project.
 
-Your job is to read ONLY the pasted scene text from this one request and extract possible long-term memory items.
+Your job is to read ONLY the pasted scene text from this one request and extract possible canon memory facts.
 Do not give writing advice.
 Do not critique the scene.
 Do not rewrite the scene.
@@ -51,26 +52,21 @@ Use ONLY the current scene provided by the user in this one request.
 
 Return output in this exact structure:
 
-### MEMORY SUGGESTIONS
+Memory suggestions:
 
-Context:
-- ...
-
-Timeline:
-- ...
-
-World:
-- ...
-
-Ideas:
-- ...
+1. fact text -> [Category]
+2. fact text -> [Category]
+3. fact text -> [Category]
 
 Rules:
-- Include only concrete memory candidates or clearly labeled story ideas.
-- Keep each bullet short and specific.
-- If a section has nothing useful, write:
-- None
-- Return ONLY the structured MEMORY SUGGESTIONS output.
+- Use short, concrete facts only.
+- Every suggestion must include exactly one category tag in square brackets.
+- Allowed categories include Context, World, Location, Timeline, Character, Relationship, Object, or other concise canon-memory labels when needed.
+- If there are no strong canon facts, return exactly:
+Memory suggestions:
+
+None
+- Return ONLY the Memory suggestions output.
 """
 
 CONTINUITY_SYSTEM_PROMPT = """You are a strict continuity editor for a novel project.
@@ -113,12 +109,8 @@ def ensure_project_files() -> None:
     """Create the expected project folders and files if they do not already exist."""
     PROJECT_MEMORY_DIR.mkdir(parents=True, exist_ok=True)
     CONTINUITY_REPORTS_DIR.mkdir(parents=True, exist_ok=True)
-
-    for path in MEMORY_FILES.values():
-        path.touch(exist_ok=True)
-
+    CANON_MEMORY_PATH.touch(exist_ok=True)
     SCENE_SUMMARIES_PATH.touch(exist_ok=True)
-
 
 
 
@@ -130,32 +122,103 @@ def read_text_file(path: Path) -> str:
 
 
 def load_memory_block() -> str:
-    """Load canonical continuity memory for the main assistant."""
-    sections = []
-    for name, path in MEMORY_FILES.items():
-        title = name.capitalize()
-        sections.append(f"{title}:\n{read_text_file(path)}")
-    return "\n\n".join(sections)
+    """Load canonical story memory for the main assistant and continuity checker."""
+    return read_text_file(CANON_MEMORY_PATH)
 
 
 
-def append_memory_fact(memory_key: str, fact: str) -> None:
-    """Append one fact to the chosen canonical memory file."""
+def parse_canon_memory(content: str) -> list[dict[str, Any]]:
+    """Parse canon memory text into ordered chapter/category blocks."""
+    chapters: list[dict[str, Any]] = []
+    current_chapter: dict[str, Any] | None = None
+    current_category: str | None = None
+
+    for raw_line in content.splitlines():
+        line = raw_line.rstrip()
+        stripped = line.strip()
+
+        if not stripped or stripped == "========================":
+            continue
+
+        chapter_match = CHAPTER_HEADER_PATTERN.fullmatch(stripped)
+        if chapter_match is not None:
+            current_chapter = {
+                "number": int(chapter_match.group(1)),
+                "categories": OrderedDict(),
+            }
+            chapters.append(current_chapter)
+            current_category = None
+            continue
+
+        category_match = CATEGORY_HEADER_PATTERN.fullmatch(stripped)
+        if category_match is not None:
+            if current_chapter is None:
+                continue
+            current_category = category_match.group(1).strip()
+            current_chapter["categories"].setdefault(current_category, [])
+            continue
+
+        if stripped.startswith("-") and current_chapter is not None and current_category is not None:
+            fact = stripped[1:].strip()
+            if fact:
+                current_chapter["categories"][current_category].append(fact)
+
+    return chapters
+
+
+
+def render_canon_memory(chapters: list[dict[str, Any]]) -> str:
+    """Render ordered chapter/category blocks back to canon memory text."""
+    blocks: list[str] = []
+    for chapter in chapters:
+        lines = ["========================", f"CHAPTER {chapter['number']}"]
+        for category, facts in chapter["categories"].items():
+            lines.append("")
+            lines.append(f"[{category}]")
+            for fact in facts:
+                lines.append(f"- {fact}")
+        blocks.append("\n".join(lines).rstrip())
+    return "\n\n".join(blocks).rstrip() + ("\n" if blocks else "")
+
+
+
+def append_to_canon_memory(
+    chapter_number: int,
+    selected_facts: list[tuple[str, str]],
+) -> None:
+    """Append selected canon facts into the appropriate chapter block."""
     ensure_project_files()
-    cleaned_fact = fact.strip()
-    if not cleaned_fact:
-        print("Nothing saved.")
+    cleaned_facts = [
+        (fact.strip(), category.strip())
+        for fact, category in selected_facts
+        if fact.strip() and category.strip()
+    ]
+    if not cleaned_facts:
+        print("No canon facts selected to save.")
         return
 
-    path = MEMORY_FILES[memory_key]
-    with path.open("a", encoding="utf-8") as file:
-        file.write(cleaned_fact + "\n")
+    existing_content = CANON_MEMORY_PATH.read_text(encoding="utf-8")
+    chapters = parse_canon_memory(existing_content)
 
-    print(f"Saved to {path}.")
+    target_chapter: dict[str, Any] | None = None
+    for chapter in chapters:
+        if chapter["number"] == chapter_number:
+            target_chapter = chapter
+            break
+
+    if target_chapter is None:
+        target_chapter = {"number": chapter_number, "categories": OrderedDict()}
+        chapters.append(target_chapter)
+
+    for fact, category in cleaned_facts:
+        target_chapter["categories"].setdefault(category, []).append(fact)
+
+    CANON_MEMORY_PATH.write_text(render_canon_memory(chapters), encoding="utf-8")
+    print(f"Saved {len(cleaned_facts)} canon fact(s) to {CANON_MEMORY_PATH}.")
 
 
 
-def append_scene_summary(summary_text: str) -> None:
+def append_scene_summary(chapter_number: int, summary_text: str) -> None:
     """Append scene extraction output to the non-canonical storage log."""
     ensure_project_files()
     cleaned_summary = summary_text.strip()
@@ -165,7 +228,7 @@ def append_scene_summary(summary_text: str) -> None:
     with SCENE_SUMMARIES_PATH.open("a", encoding="utf-8") as file:
         if SCENE_SUMMARIES_PATH.stat().st_size > 0:
             file.write("\n\n" + ("-" * 40) + "\n\n")
-        file.write(cleaned_summary + "\n")
+        file.write(f"CHAPTER {chapter_number}\n\n{cleaned_summary}\n")
 
 
 
@@ -224,14 +287,74 @@ def collect_multiline_input(end_marker: str = "END") -> str:
 
 
 
-def prompt_for_fact() -> str:
-    """Ask the user for a fact to save."""
-    print("Enter fact to save:")
+def prompt_for_chapter_number() -> int | None:
+    """Ask the user for a chapter number."""
+    print("Chapter number?")
     try:
-        return input("> ")
+        raw_value = input("> ").strip()
     except EOFError:
         print()
-        return ""
+        return None
+
+    if not raw_value:
+        print("No chapter number entered.")
+        return None
+
+    if not raw_value.isdigit():
+        print("Chapter number must be a positive integer.")
+        return None
+
+    chapter_number = int(raw_value)
+    if chapter_number <= 0:
+        print("Chapter number must be a positive integer.")
+        return None
+
+    return chapter_number
+
+
+
+def parse_memory_suggestions(result: str) -> list[tuple[int, str, str]]:
+    """Parse numbered memory suggestions from the scene extractor output."""
+    suggestions: list[tuple[int, str, str]] = []
+    for match in SUGGESTION_PATTERN.finditer(result):
+        number = int(match.group(1))
+        fact = match.group(2).strip()
+        category = match.group(3).strip()
+        suggestions.append((number, fact, category))
+    return suggestions
+
+
+
+def prompt_for_selection(max_number: int) -> list[int] | None:
+    """Ask the user which extracted facts should be saved."""
+    print("\nSelect numbers to save:")
+    try:
+        raw_selection = input("> ").strip()
+    except EOFError:
+        print()
+        return None
+
+    if not raw_selection:
+        print("No selections entered. Nothing saved.")
+        return []
+
+    tokens = raw_selection.replace(",", " ").split()
+    selections: list[int] = []
+    seen: set[int] = set()
+
+    for token in tokens:
+        if not token.isdigit():
+            print(f"Invalid selection: {token}")
+            return None
+        number = int(token)
+        if number < 1 or number > max_number:
+            print(f"Selection out of range: {number}")
+            return None
+        if number not in seen:
+            selections.append(number)
+            seen.add(number)
+
+    return selections
 
 
 # ============================================================
@@ -336,16 +459,13 @@ def build_continuity_messages(
 # ============================================================
 
 
-def handle_save_command(memory_key: str) -> None:
-    """Save one fact into a memory file."""
-    fact = prompt_for_fact()
-    append_memory_fact(memory_key, fact)
-
-
-
 def handle_scene_summary(client: Any) -> None:
     """Analyse one pasted scene in a fully isolated request."""
-    print("Enter scene to summarise:")
+    chapter_number = prompt_for_chapter_number()
+    if chapter_number is None:
+        return
+
+    print("Paste scene. Type END when finished.")
     scene_text = collect_multiline_input(end_marker="END")
 
     if not scene_text:
@@ -365,7 +485,7 @@ def handle_scene_summary(client: Any) -> None:
         return
 
     try:
-        append_scene_summary(result)
+        append_scene_summary(chapter_number, result)
     except OSError as exc:
         print(f"Scene summary generated, but could not save log: {exc}")
         print()
@@ -374,7 +494,36 @@ def handle_scene_summary(client: Any) -> None:
 
     print()
     print(result)
-    print(f"\nScene summary log saved to {SCENE_SUMMARIES_PATH}.")
+
+    suggestions = parse_memory_suggestions(result)
+    if not suggestions:
+        print(f"\nScene summary log saved to {SCENE_SUMMARIES_PATH}.")
+        print("No structured canon suggestions found. Nothing saved.")
+        return
+
+    selection_numbers = prompt_for_selection(max(number for number, _, _ in suggestions))
+    if selection_numbers is None:
+        print(f"Scene summary log saved to {SCENE_SUMMARIES_PATH}.")
+        print("Nothing saved.")
+        return
+
+    selected_lookup = {number for number in selection_numbers}
+    selected_facts = [
+        (fact, category)
+        for number, fact, category in suggestions
+        if number in selected_lookup
+    ]
+
+    if selected_facts:
+        try:
+            append_to_canon_memory(chapter_number, selected_facts)
+        except OSError as exc:
+            print(f"Could not save canon memory: {exc}")
+            return
+    else:
+        print("Nothing saved.")
+
+    print(f"Scene summary log saved to {SCENE_SUMMARIES_PATH}.")
 
 
 
@@ -468,10 +617,6 @@ def print_help() -> None:
     print("Available commands:")
     print("  /scene-summary")
     print("  /continuity-check")
-    print("  /save-context")
-    print("  /save-world")
-    print("  /save-idea")
-    print("  /save-timeline")
     print("  /help")
     print("  exit")
 
@@ -492,10 +637,6 @@ def main() -> None:
     command_handlers: dict[str, Callable[[], None]] = {
         "/scene-summary": lambda: handle_scene_summary(client),
         "/continuity-check": lambda: handle_continuity_check(client),
-        "/save-context": lambda: handle_save_command("context"),
-        "/save-world": lambda: handle_save_command("world"),
-        "/save-idea": lambda: handle_save_command("ideas"),
-        "/save-timeline": lambda: handle_save_command("timeline"),
         "/help": print_help,
     }
 
