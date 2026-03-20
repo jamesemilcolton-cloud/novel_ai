@@ -17,6 +17,7 @@ PROJECT_MEMORY_DIR = NOVEL_PROJECT_DIR / "memory"
 PROJECT_ANALYSIS_DIR = NOVEL_PROJECT_DIR / "analysis"
 CHAPTERS_DIR = NOVEL_PROJECT_DIR / "chapters"
 CONTINUITY_REPORTS_DIR = PROJECT_ANALYSIS_DIR / "continuity_reports"
+SCENE_SUMMARIES_PATH = PROJECT_MEMORY_DIR / "scene_summaries.txt"
 CHAPTER_FILENAME_PATTERN = re.compile(r"chapter_(\d+)\.txt$")
 
 MEMORY_FILES = {
@@ -116,6 +117,8 @@ def ensure_project_files() -> None:
     for path in MEMORY_FILES.values():
         path.touch(exist_ok=True)
 
+    SCENE_SUMMARIES_PATH.touch(exist_ok=True)
+
 
 
 
@@ -149,6 +152,20 @@ def append_memory_fact(memory_key: str, fact: str) -> None:
         file.write(cleaned_fact + "\n")
 
     print(f"Saved to {path}.")
+
+
+
+def append_scene_summary(summary_text: str) -> None:
+    """Append scene extraction output to the non-canonical storage log."""
+    ensure_project_files()
+    cleaned_summary = summary_text.strip()
+    if not cleaned_summary:
+        return
+
+    with SCENE_SUMMARIES_PATH.open("a", encoding="utf-8") as file:
+        if SCENE_SUMMARIES_PATH.stat().st_size > 0:
+            file.write("\n\n" + ("-" * 40) + "\n\n")
+        file.write(cleaned_summary + "\n")
 
 
 
@@ -328,7 +345,7 @@ def handle_save_command(memory_key: str) -> None:
 
 def handle_scene_summary(client: Any) -> None:
     """Analyse one pasted scene in a fully isolated request."""
-    print("Enter scene to analyse. Type END on a new line when finished:")
+    print("Enter scene to summarise:")
     scene_text = collect_multiline_input(end_marker="END")
 
     if not scene_text:
@@ -347,8 +364,17 @@ def handle_scene_summary(client: Any) -> None:
         print(f"Scene summary failed: {exc}")
         return
 
+    try:
+        append_scene_summary(result)
+    except OSError as exc:
+        print(f"Scene summary generated, but could not save log: {exc}")
+        print()
+        print(result)
+        return
+
     print()
     print(result)
+    print(f"\nScene summary log saved to {SCENE_SUMMARIES_PATH}.")
 
 
 
