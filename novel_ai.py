@@ -3,6 +3,7 @@ from __future__ import annotations
 import os
 import re
 from collections import OrderedDict
+from datetime import datetime
 from pathlib import Path
 from typing import Any, Callable
 
@@ -18,6 +19,7 @@ PROJECT_MEMORY_DIR = NOVEL_PROJECT_DIR / "memory"
 PROJECT_ANALYSIS_DIR = NOVEL_PROJECT_DIR / "analysis"
 CHAPTERS_DIR = NOVEL_PROJECT_DIR / "chapters"
 CONTINUITY_REPORTS_DIR = PROJECT_ANALYSIS_DIR / "continuity_reports"
+REBUILD_LOG_DIR = PROJECT_ANALYSIS_DIR / "rebuild_logs"
 CANON_MEMORY_PATH = PROJECT_MEMORY_DIR / "canon_memory.txt"
 SCENE_SUMMARIES_PATH = PROJECT_MEMORY_DIR / "scene_summaries.txt"
 CHAPTER_FILENAME_PATTERN = re.compile(r"chapter_(\d+)\.txt$")
@@ -109,6 +111,7 @@ def ensure_project_files() -> None:
     """Create the expected project folders and files if they do not already exist."""
     PROJECT_MEMORY_DIR.mkdir(parents=True, exist_ok=True)
     CONTINUITY_REPORTS_DIR.mkdir(parents=True, exist_ok=True)
+    REBUILD_LOG_DIR.mkdir(parents=True, exist_ok=True)
     CANON_MEMORY_PATH.touch(exist_ok=True)
     SCENE_SUMMARIES_PATH.touch(exist_ok=True)
 
@@ -229,6 +232,61 @@ def append_scene_summary(chapter_number: int, summary_text: str) -> None:
         if SCENE_SUMMARIES_PATH.stat().st_size > 0:
             file.write("\n\n" + ("-" * 40) + "\n\n")
         file.write(f"CHAPTER {chapter_number}\n\n{cleaned_summary}\n")
+
+
+
+def build_chapter_memory_block(
+    chapter_number: int,
+    suggestions: list[tuple[int, str, str]],
+) -> dict[str, Any]:
+    """Convert extracted suggestions into one ordered canon-memory chapter block."""
+    categories: OrderedDict[str, list[str]] = OrderedDict()
+    for _, fact, category in suggestions:
+        cleaned_fact = fact.strip()
+        cleaned_category = category.strip()
+        if not cleaned_fact or not cleaned_category:
+            continue
+        categories.setdefault(cleaned_category, []).append(cleaned_fact)
+
+    return {
+        "number": chapter_number,
+        "categories": categories,
+    }
+
+
+
+def insert_or_replace_chapter_block(
+    chapters: list[dict[str, Any]],
+    rebuilt_chapter: dict[str, Any],
+) -> list[dict[str, Any]]:
+    """Replace one chapter block and keep chapter ordering numeric."""
+    filtered_chapters = [
+        chapter
+        for chapter in chapters
+        if chapter["number"] != rebuilt_chapter["number"]
+    ]
+    filtered_chapters.append(rebuilt_chapter)
+    filtered_chapters.sort(key=lambda chapter: chapter["number"])
+    return filtered_chapters
+
+
+
+def write_rebuild_log(
+    mode: str,
+    lines: list[str],
+) -> Path:
+    """Write a rebuild log file and return its path."""
+    timestamp = datetime.utcnow()
+    log_path = REBUILD_LOG_DIR / f"rebuild_{timestamp.strftime('%Y%m%d_%H%M')}.txt"
+    content = "\n".join(
+        [
+            f"mode: {mode}",
+            *lines,
+            f"timestamp: {timestamp.strftime('%Y-%m-%d %H:%M:%S UTC')}",
+        ]
+    )
+    log_path.write_text(content + "\n", encoding="utf-8")
+    return log_path
 
 
 
@@ -455,6 +513,25 @@ def build_continuity_messages(
 
 
 # ============================================================
+# Extraction helpers
+# ============================================================
+
+
+def extract_memory_suggestions_for_text(
+    client: Any,
+    scene_text: str,
+) -> list[tuple[int, str, str]]:
+    """Run the shared isolated extractor and return parsed suggestions."""
+    result = request_chat_completion(
+        client=client,
+        messages=build_scene_messages(scene_text),
+        temperature=SCENE_TEMPERATURE,
+    )
+    return parse_memory_suggestions(result)
+
+
+
+# ============================================================
 # Command handlers
 # ============================================================
 
@@ -472,12 +549,10 @@ def handle_scene_summary(client: Any) -> None:
         print("No scene entered.")
         return
 
-    messages = build_scene_messages(scene_text)
-
     try:
         result = request_chat_completion(
             client=client,
-            messages=messages,
+            messages=build_scene_messages(scene_text),
             temperature=SCENE_TEMPERATURE,
         )
     except Exception as exc:  # Keep terminal app stable for the user.
@@ -597,6 +672,133 @@ def handle_continuity_check(client: Any) -> None:
     print(f"Continuity report saved to {report_path}.")
 
 
+
+def handle_rebuild_memory(client: Any) -> None:
+    """Rebuild canon memory for the whole novel or one chapter."""
+    ensure_project_files()
+    print("Rebuild options:")
+    print()
+    print("1) Rebuild entire novel")
+    print("2) Rebuild single chapter")
+
+    try:
+        selection = input("> ").strip()
+    except EOFError:
+        print()
+        return
+
+    if selection == "1":
+        if not CHAPTERS_DIR.exists():
+            print(f"Missing chapters directory: {CHAPTERS_DIR}")
+            return
+
+        chapter_paths = load_sorted_chapter_paths()
+        if not chapter_paths:
+            print("No chapter files found.")
+            return
+
+        rebuilt_chapters: list[dict[str, Any]] = []
+        total_facts = 0
+
+        for chapter_path in chapter_paths:
+            chapter_number = extract_chapter_number(chapter_path)
+            if chapter_number is None:
+                continue
+
+            print(f"Processing chapter {chapter_number}...")
+            try:
+                suggestions = extract_memory_suggestions_for_text(
+                    client=client,
+                    scene_text=chapter_path.read_text(encoding="utf-8").strip(),
+                )
+            except Exception as exc:  # Keep terminal app stable for the user.
+                print(f"Rebuild failed while processing chapter {chapter_number}: {exc}")
+                return
+
+            rebuilt_chapters.append(build_chapter_memory_block(chapter_number, suggestions))
+            total_facts += len(suggestions)
+            print(f"Extracted {len(suggestions)} fact(s) from chapter {chapter_number}.")
+
+        rebuilt_chapters.sort(key=lambda chapter: chapter["number"])
+
+        try:
+            CANON_MEMORY_PATH.write_text(
+                render_canon_memory(rebuilt_chapters),
+                encoding="utf-8",
+            )
+            log_path = write_rebuild_log(
+                mode="FULL",
+                lines=[
+                    "chapters processed: "
+                    + ", ".join(str(chapter["number"]) for chapter in rebuilt_chapters),
+                    f"total facts extracted: {total_facts}",
+                ],
+            )
+        except OSError as exc:
+            print(f"Rebuild completed, but could not save files: {exc}")
+            return
+
+        print()
+        print(
+            f"Full rebuild complete. Wrote {len(rebuilt_chapters)} chapter block(s) "
+            f"and {total_facts} fact(s) to {CANON_MEMORY_PATH}."
+        )
+        print(f"Rebuild log saved to {log_path}.")
+        return
+
+    if selection == "2":
+        chapter_number = prompt_for_chapter_number()
+        if chapter_number is None:
+            return
+
+        chapter_path = CHAPTERS_DIR / f"chapter_{chapter_number}.txt"
+        if not chapter_path.exists() or not chapter_path.is_file():
+            print(f"Chapter file not found: {chapter_path}")
+            return
+
+        print(f"Processing chapter {chapter_number}...")
+        try:
+            suggestions = extract_memory_suggestions_for_text(
+                client=client,
+                scene_text=chapter_path.read_text(encoding="utf-8").strip(),
+            )
+        except Exception as exc:  # Keep terminal app stable for the user.
+            print(f"Single-chapter rebuild failed: {exc}")
+            return
+
+        rebuilt_chapter = build_chapter_memory_block(chapter_number, suggestions)
+        existing_content = (
+            CANON_MEMORY_PATH.read_text(encoding="utf-8")
+            if CANON_MEMORY_PATH.exists()
+            else ""
+        )
+        chapters = parse_canon_memory(existing_content)
+        chapters = insert_or_replace_chapter_block(chapters, rebuilt_chapter)
+
+        try:
+            CANON_MEMORY_PATH.write_text(render_canon_memory(chapters), encoding="utf-8")
+            log_path = write_rebuild_log(
+                mode="SINGLE",
+                lines=[
+                    f"chapter number: {chapter_number}",
+                    f"facts extracted: {len(suggestions)}",
+                ],
+            )
+        except OSError as exc:
+            print(f"Single-chapter rebuild completed, but could not save files: {exc}")
+            return
+
+        print()
+        print(
+            f"Single-chapter rebuild complete for chapter {chapter_number}. "
+            f"Saved {len(suggestions)} fact(s) to {CANON_MEMORY_PATH}."
+        )
+        print(f"Rebuild log saved to {log_path}.")
+        return
+
+    print("Invalid selection. Enter 1 or 2.")
+
+
 # ============================================================
 # Main application loop
 # ============================================================
@@ -616,6 +818,7 @@ def print_help() -> None:
     """Show available commands."""
     print("Available commands:")
     print("  /scene-summary")
+    print("  /rebuild-memory")
     print("  /continuity-check")
     print("  /help")
     print("  exit")
@@ -636,6 +839,7 @@ def main() -> None:
 
     command_handlers: dict[str, Callable[[], None]] = {
         "/scene-summary": lambda: handle_scene_summary(client),
+        "/rebuild-memory": lambda: handle_rebuild_memory(client),
         "/continuity-check": lambda: handle_continuity_check(client),
         "/help": print_help,
     }
