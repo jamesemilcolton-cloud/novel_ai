@@ -82,10 +82,21 @@ Memory suggestions:
 3. fact text -> [Category]
 
 Rules:
-- Use short, concrete facts only.
-- Every suggestion must include exactly one category tag in square brackets.
-- Allowed categories include Context, World, Location, Timeline, Character, Relationship, Object, or other concise canon-memory labels when needed.
+- Use short, concrete factual continuity statements only.
+- Every suggestion MUST use exactly one of these categories:
+
+Character
+Timeline
+World
+Object
+Relationship
+Injury
+Location
+
+- Do NOT invent new categories.
+- Do NOT use Context, Emotion, Theme, Atmosphere, or custom labels.
 - If there are no strong canon facts, return exactly:
+
 Memory suggestions:
 
 None
