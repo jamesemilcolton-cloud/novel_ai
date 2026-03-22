@@ -997,14 +997,8 @@ def handle_new_chapter() -> None:
         return
 
     try:
-        wg_path.touch(exist_ok=False)
         txt_path.touch(exist_ok=False)
     except OSError as exc:
-        if wg_path.exists() and not txt_path.exists():
-            try:
-                wg_path.unlink()
-            except OSError:
-                pass
         print(f"Could not create chapter files: {exc}")
         return
 
@@ -1022,10 +1016,10 @@ def handle_new_chapter() -> None:
             str(wg_path),
         ])
     except OSError as exc:
-        print(f"Chapter files created, but WordGrinder could not be launched: {exc}")
+        print(f"Chapter text file created, but WordGrinder could not be launched: {exc}")
         return
 
-    print(f"Created chapter_{next_chapter_number}.wg and chapter_{next_chapter_number}.txt")
+    print(f"Opening new chapter in WordGrinder: chapter_{next_chapter_number}.wg")
 
 
 def handle_scene_summary(client: Any) -> None:
