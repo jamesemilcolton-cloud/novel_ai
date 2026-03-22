@@ -32,6 +32,9 @@ SUGGESTION_PATTERN = re.compile(
 )
 CHAPTER_HEADER_PATTERN = re.compile(r"^CHAPTER\s+(\d+)\s*$")
 CATEGORY_HEADER_PATTERN = re.compile(r"^\[(.+)\]\s*$")
+ANSI_ESCAPE_PATTERN = re.compile(r"\033\[[0-9;]*[A-Za-z]")
+BRACKETED_PASTE_PATTERN = re.compile(r"(?:\033\[|\^\[\[?)(?:200~|201~|E)|\[\[200~|\[\[201~")
+DISALLOWED_CONTROL_CHAR_PATTERN = re.compile(r"[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]")
 
 MODEL_NAME = os.getenv("OPENAI_MODEL", "gpt-4.1-mini")
 MAIN_TEMPERATURE = 0.8
@@ -407,6 +410,14 @@ def build_manuscript_text(chapter_paths: list[Path]) -> str:
 # ============================================================
 
 
+def clean_terminal_text(text: str) -> str:
+    """Remove terminal control artifacts from pasted multi-line text."""
+    cleaned_text = ANSI_ESCAPE_PATTERN.sub("", text)
+    cleaned_text = BRACKETED_PASTE_PATTERN.sub("", cleaned_text)
+    cleaned_text = DISALLOWED_CONTROL_CHAR_PATTERN.sub("", cleaned_text)
+    return cleaned_text.strip()
+
+
 def collect_multiline_input(end_marker: str = "END") -> str:
     """Collect multi-line input until the user types the end marker."""
     lines: list[str] = []
@@ -421,7 +432,7 @@ def collect_multiline_input(end_marker: str = "END") -> str:
             break
         lines.append(line)
 
-    return "\n".join(lines).strip()
+    return clean_terminal_text("\n".join(lines))
 
 
 
@@ -638,6 +649,7 @@ def handle_scene_summary(client: Any) -> None:
 
     print("Paste scene. Type END when finished.")
     scene_text = collect_multiline_input(end_marker="END")
+    scene_text = clean_terminal_text(scene_text)
 
     if not scene_text:
         print("No scene entered.")
@@ -897,6 +909,7 @@ def handle_proofread(client: Any) -> None:
     """Proofread pasted text in a fully isolated request."""
     print("Paste text to proofread. Type END on a new line when finished.")
     text_to_proofread = collect_multiline_input(end_marker="END")
+    text_to_proofread = clean_terminal_text(text_to_proofread)
 
     if not text_to_proofread:
         print("No text provided.")
@@ -945,6 +958,7 @@ def handle_ideas() -> None:
     """Capture a freeform writing idea without affecting assistant state."""
     print("Paste idea. Type END on a new line when finished.")
     idea_text = collect_multiline_input(end_marker="END")
+    idea_text = clean_terminal_text(idea_text)
 
     if not idea_text:
         print("No idea entered.")
