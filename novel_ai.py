@@ -37,6 +37,7 @@ MODEL_NAME = os.getenv("OPENAI_MODEL", "gpt-4.1-mini")
 MAIN_TEMPERATURE = 0.8
 SCENE_TEMPERATURE = 0.1
 CONTINUITY_TEMPERATURE = 0.0
+PROOFREAD_TEMPERATURE = 0.1
 
 MAIN_SYSTEM_PROMPT = """You are a thoughtful AI novel-writing assistant.
 Help the user think through story ideas, scenes, structure, tone, character, and prose.
@@ -102,6 +103,35 @@ CONTINUITY REPORT
 
 - Issue 1
 - Issue 2
+"""
+
+PROOFREAD_SYSTEM_PROMPT = """You are a professional proofreader.
+
+You must:
+- Correct grammar
+- Correct punctuation
+- Correct spelling
+- Improve vocabulary where appropriate
+- Improve sentence clarity
+
+You must NOT:
+- Change story meaning
+- Add new content
+- Remove content
+- Summarise
+- Change plot or character actions
+- Reorder paragraphs
+- Give writing advice
+- Mention style or pacing
+
+Return output in this exact structure:
+
+PROOFREAD RESULT
+
+<corrected text>
+
+VOCABULARY SUGGESTIONS
+- original → improved
 """
 
 
@@ -562,6 +592,20 @@ def build_continuity_messages(
     ]
 
 
+def build_proofread_messages(text_to_proofread: str) -> list[dict[str, str]]:
+    """Build the isolated message list for proofreading."""
+    return [
+        {
+            "role": "system",
+            "content": PROOFREAD_SYSTEM_PROMPT,
+        },
+        {
+            "role": "user",
+            "content": text_to_proofread,
+        },
+    ]
+
+
 # ============================================================
 # Extraction helpers
 # ============================================================
@@ -849,6 +893,29 @@ def handle_rebuild_memory(client: Any) -> None:
     print("Invalid selection. Enter 1 or 2.")
 
 
+def handle_proofread(client: Any) -> None:
+    """Proofread pasted text in a fully isolated request."""
+    print("Paste text to proofread. Type END on a new line when finished.")
+    text_to_proofread = collect_multiline_input(end_marker="END")
+
+    if not text_to_proofread:
+        print("No text provided.")
+        return
+
+    try:
+        result = request_chat_completion(
+            client=client,
+            messages=build_proofread_messages(text_to_proofread),
+            temperature=PROOFREAD_TEMPERATURE,
+        )
+    except Exception:  # Keep terminal app stable for the user.
+        print("Proofread failed.")
+        return
+
+    print()
+    print(result)
+
+
 
 def handle_build_book() -> None:
     """Compile all numbered chapter files into a single manuscript file."""
@@ -910,6 +977,7 @@ def print_help() -> None:
     print("  /scene-summary")
     print("  /rebuild-memory")
     print("  /continuity-check")
+    print("  /proofread")
     print("  /build-book")
     print("  /ideas")
     print("  /help")
@@ -933,6 +1001,7 @@ def main() -> None:
         "/scene-summary": lambda: handle_scene_summary(client),
         "/rebuild-memory": lambda: handle_rebuild_memory(client),
         "/continuity-check": lambda: handle_continuity_check(client),
+        "/proofread": lambda: handle_proofread(client),
         "/build-book": handle_build_book,
         "/ideas": handle_ideas,
         "/help": print_help,
