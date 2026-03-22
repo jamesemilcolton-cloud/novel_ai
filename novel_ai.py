@@ -84,7 +84,8 @@ Memory suggestions:
 Rules:
 - Use short, concrete facts only.
 - Every suggestion must include exactly one category tag in square brackets.
-- Allowed categories include Context, World, Location, Timeline, Character, Relationship, Object, or other concise canon-memory labels when needed.
+- Allowed categories are exactly: Character, Timeline, World, Object, Relationship, Injury, Location.
+- Do not use any category outside that list.
 - If there are no strong canon facts, return exactly:
 Memory suggestions:
 
@@ -119,6 +120,7 @@ Rules for MEMORY SUGGESTIONS:
 - Use a numbered list.
 - Use short, concrete canon facts from the scene only.
 - Every suggestion must use exactly one of these categories: Character, Timeline, World, Object, Relationship, Injury, Location.
+- Do not use any other category.
 - If there are no strong canon facts, write exactly: None
 
 Rules for CHAPTER STRUCTURE NOTE:
@@ -246,6 +248,14 @@ def read_text_file(path: Path) -> str:
     """Read a text file and return cleaned text."""
     text = path.read_text(encoding="utf-8").strip()
     return text if text else "(empty)"
+
+
+
+def atomic_write_text(path: Path, content: str) -> None:
+    """Write text to a temporary file and atomically replace the target."""
+    tmp = path.with_suffix(path.suffix + ".tmp")
+    tmp.write_text(content, encoding="utf-8")
+    tmp.replace(path)
 
 
 
@@ -418,12 +428,20 @@ def append_to_canon_memory(
         target_chapter = {"number": chapter_number, "categories": OrderedDict()}
         chapters.append(target_chapter)
 
+    saved_count = 0
+    skipped_count = 0
+
     for fact, category in cleaned_facts:
-        target_chapter["categories"].setdefault(category, []).append(fact)
+        category_facts = target_chapter["categories"].setdefault(category, [])
+        if fact in category_facts:
+            skipped_count += 1
+            continue
+        category_facts.append(fact)
+        saved_count += 1
 
     chapters.sort(key=lambda chapter: chapter["number"])
-    CANON_MEMORY_PATH.write_text(render_canon_memory(chapters), encoding="utf-8")
-    print(f"Saved {len(cleaned_facts)} canon fact(s) to {CANON_MEMORY_PATH}.")
+    atomic_write_text(CANON_MEMORY_PATH, render_canon_memory(chapters))
+    print(f"Saved {saved_count} new canon fact(s). Skipped {skipped_count} duplicate(s).")
 
 
 
@@ -476,7 +494,10 @@ def build_chapter_memory_block(
         cleaned_category = category.strip()
         if not cleaned_fact or not cleaned_category:
             continue
-        categories.setdefault(cleaned_category, []).append(cleaned_fact)
+        category_facts = categories.setdefault(cleaned_category, [])
+        if cleaned_fact in category_facts:
+            continue
+        category_facts.append(cleaned_fact)
 
     return {
         "number": chapter_number,
@@ -507,7 +528,7 @@ def write_rebuild_log(
 ) -> Path:
     """Write a rebuild log file and return its path."""
     timestamp = datetime.utcnow()
-    log_path = REBUILD_LOG_DIR / f"rebuild_{timestamp.strftime('%Y%m%d_%H%M')}.txt"
+    log_path = REBUILD_LOG_DIR / f"rebuild_{timestamp.strftime('%Y%m%d_%H%M%S')}.txt"
     content = "\n".join(
         [
             f"mode: {mode}",
@@ -515,7 +536,7 @@ def write_rebuild_log(
             f"timestamp: {timestamp.strftime('%Y-%m-%d %H:%M:%S UTC')}",
         ]
     )
-    log_path.write_text(content + "\n", encoding="utf-8")
+    atomic_write_text(log_path, content + "\n")
     return log_path
 
 
@@ -1024,7 +1045,7 @@ def handle_continuity_check(client: Any) -> None:
         for path in chapter_paths
         if extract_chapter_number(path) is not None
         and extract_chapter_number(path) < selected_number
-    ]
+    ][-5:]
 
     memory_block = load_memory_block()
     world_rules_block = load_world_rules_block()
@@ -1050,7 +1071,7 @@ def handle_continuity_check(client: Any) -> None:
 
     report_path = CONTINUITY_REPORTS_DIR / f"{selected_path.stem}_report.txt"
     try:
-        report_path.write_text(report + "\n", encoding="utf-8")
+        atomic_write_text(report_path, report + "\n")
     except OSError as exc:
         print(f"Continuity report could not be saved: {exc}")
         return
@@ -1111,9 +1132,9 @@ def handle_rebuild_memory(client: Any) -> None:
         rebuilt_chapters.sort(key=lambda chapter: chapter["number"])
 
         try:
-            CANON_MEMORY_PATH.write_text(
+            atomic_write_text(
+                CANON_MEMORY_PATH,
                 render_canon_memory(rebuilt_chapters),
-                encoding="utf-8",
             )
             log_path = write_rebuild_log(
                 mode="FULL",
@@ -1165,7 +1186,7 @@ def handle_rebuild_memory(client: Any) -> None:
         chapters = insert_or_replace_chapter_block(chapters, rebuilt_chapter)
 
         try:
-            CANON_MEMORY_PATH.write_text(render_canon_memory(chapters), encoding="utf-8")
+            atomic_write_text(CANON_MEMORY_PATH, render_canon_memory(chapters))
             log_path = write_rebuild_log(
                 mode="SINGLE",
                 lines=[
@@ -1274,7 +1295,7 @@ def handle_build_book(clean: bool = False) -> None:
 
     try:
         MANUSCRIPT_DIR.mkdir(parents=True, exist_ok=True)
-        output_path.write_text(manuscript_text, encoding="utf-8")
+        atomic_write_text(output_path, manuscript_text)
     except OSError as exc:
         print(f"Manuscript build failed: {exc}")
         return
