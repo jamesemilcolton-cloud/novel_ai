@@ -18,6 +18,8 @@ NOVEL_PROJECT_DIR = WRITING_DIR / "novel_project"
 PROJECT_MEMORY_DIR = NOVEL_PROJECT_DIR / "memory"
 PROJECT_ANALYSIS_DIR = NOVEL_PROJECT_DIR / "analysis"
 CHAPTERS_DIR = NOVEL_PROJECT_DIR / "chapters"
+MANUSCRIPT_DIR = NOVEL_PROJECT_DIR / "manuscript"
+MANUSCRIPT_PATH = MANUSCRIPT_DIR / "novel.txt"
 CONTINUITY_REPORTS_DIR = PROJECT_ANALYSIS_DIR / "continuity_reports"
 REBUILD_LOG_DIR = PROJECT_ANALYSIS_DIR / "rebuild_logs"
 CANON_MEMORY_PATH = PROJECT_MEMORY_DIR / "canon_memory.txt"
@@ -320,6 +322,32 @@ def format_chapter_block(chapter_paths: list[Path]) -> str:
     for path in chapter_paths:
         sections.append(f"{path.name}:\n{path.read_text(encoding='utf-8').strip()}")
     return "\n\n".join(sections) if sections else "(none)"
+
+
+
+def build_manuscript_text(chapter_paths: list[Path]) -> str:
+    """Compile numbered chapter files into one manuscript string."""
+    sections: list[str] = []
+
+    for path in chapter_paths:
+        chapter_number = extract_chapter_number(path)
+        if chapter_number is None:
+            continue
+
+        chapter_text = path.read_text(encoding="utf-8").strip()
+        sections.append(
+            "\n".join(
+                [
+                    "========================",
+                    f"CHAPTER {chapter_number}",
+                    "========================",
+                    "",
+                    chapter_text,
+                ]
+            ).rstrip()
+        )
+
+    return "\n\n".join(sections) + ("\n\n" if sections else "")
 
 
 # ============================================================
@@ -799,6 +827,30 @@ def handle_rebuild_memory(client: Any) -> None:
     print("Invalid selection. Enter 1 or 2.")
 
 
+
+def handle_build_book() -> None:
+    """Compile all numbered chapter files into a single manuscript file."""
+    if not CHAPTERS_DIR.exists():
+        print("No chapter files found.")
+        return
+
+    chapter_paths = load_sorted_chapter_paths()
+    if not chapter_paths:
+        print("No chapter files found.")
+        return
+
+    manuscript_text = build_manuscript_text(chapter_paths)
+
+    try:
+        MANUSCRIPT_DIR.mkdir(parents=True, exist_ok=True)
+        MANUSCRIPT_PATH.write_text(manuscript_text, encoding="utf-8")
+    except OSError as exc:
+        print(f"Manuscript build failed: {exc}")
+        return
+
+    print("Manuscript built successfully.")
+
+
 # ============================================================
 # Main application loop
 # ============================================================
@@ -820,6 +872,7 @@ def print_help() -> None:
     print("  /scene-summary")
     print("  /rebuild-memory")
     print("  /continuity-check")
+    print("  /build-book")
     print("  /help")
     print("  exit")
 
@@ -841,6 +894,7 @@ def main() -> None:
         "/scene-summary": lambda: handle_scene_summary(client),
         "/rebuild-memory": lambda: handle_rebuild_memory(client),
         "/continuity-check": lambda: handle_continuity_check(client),
+        "/build-book": handle_build_book,
         "/help": print_help,
     }
 
