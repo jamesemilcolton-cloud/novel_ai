@@ -25,6 +25,7 @@ REBUILD_LOG_DIR = PROJECT_ANALYSIS_DIR / "rebuild_logs"
 CANON_MEMORY_PATH = PROJECT_MEMORY_DIR / "canon_memory.txt"
 SCENE_SUMMARIES_PATH = PROJECT_MEMORY_DIR / "scene_summaries.txt"
 IDEAS_PATH = PROJECT_MEMORY_DIR / "ideas.txt"
+WORLD_RULES_PATH = PROJECT_MEMORY_DIR / "world.txt"
 CHAPTER_FILENAME_PATTERN = re.compile(r"chapter_(\d+)\.txt$")
 SUGGESTION_PATTERN = re.compile(
     r"^\s*(\d+)\.\s*(.+?)\s*(?:→|->)\s*\[([^\]]+)\]\s*$",
@@ -163,6 +164,41 @@ def read_text_file(path: Path) -> str:
 def load_memory_block() -> str:
     """Load canonical story memory for the main assistant and continuity checker."""
     return read_text_file(CANON_MEMORY_PATH)
+
+
+def load_world_rules_block() -> str:
+    """Load structured world rules for continuity checking."""
+    if not WORLD_RULES_PATH.exists():
+        return "(empty)"
+    return read_text_file(WORLD_RULES_PATH)
+
+
+
+def append_world_rule(category: str, rule_text: str) -> None:
+    """Append one structured world rule without overwriting existing rules."""
+    PROJECT_MEMORY_DIR.mkdir(parents=True, exist_ok=True)
+    cleaned_category = category.strip()
+    cleaned_rule_text = rule_text.strip()
+
+    if not cleaned_category or not cleaned_rule_text:
+        raise ValueError("Category and rule text are required.")
+
+    entry = f"[{cleaned_category}]\n{cleaned_rule_text}"
+    existing_content = (
+        WORLD_RULES_PATH.read_text(encoding="utf-8")
+        if WORLD_RULES_PATH.exists()
+        else ""
+    )
+
+    with WORLD_RULES_PATH.open("a", encoding="utf-8") as file:
+        if existing_content.strip():
+            separator = "\n\n"
+            if existing_content.endswith("\n\n"):
+                separator = ""
+            elif existing_content.endswith("\n"):
+                separator = "\n"
+            file.write(separator)
+        file.write(entry + "\n")
 
 
 
@@ -582,6 +618,7 @@ def build_scene_messages(scene_text: str) -> list[dict[str, str]]:
 
 def build_continuity_messages(
     memory_block: str,
+    world_rules_block: str,
     previous_chapters_block: str,
     selected_chapter_name: str,
     selected_chapter_text: str,
@@ -596,6 +633,7 @@ def build_continuity_messages(
             "role": "user",
             "content": (
                 f"Canon memory:\n\n{memory_block}\n\n"
+                f"World rules:\n\n{world_rules_block}\n\n"
                 f"Previous chapters:\n\n{previous_chapters_block}\n\n"
                 f"Selected chapter ({selected_chapter_name}):\n\n{selected_chapter_text}"
             ),
@@ -746,10 +784,12 @@ def handle_continuity_check(client: Any) -> None:
     ]
 
     memory_block = load_memory_block()
+    world_rules_block = load_world_rules_block()
     previous_chapters_block = format_chapter_block(previous_paths)
     selected_chapter_text = selected_path.read_text(encoding="utf-8").strip()
     messages = build_continuity_messages(
         memory_block=memory_block,
+        world_rules_block=world_rules_block,
         previous_chapters_block=previous_chapters_block,
         selected_chapter_name=selected_path.name,
         selected_chapter_text=selected_chapter_text,
@@ -970,6 +1010,39 @@ def handle_ideas() -> None:
         print("Idea could not be saved.")
 
 
+def handle_world_add() -> None:
+    """Capture and save one structured world rule entry."""
+    print("Enter world rule category:")
+    try:
+        category = input("> ").strip()
+    except EOFError:
+        print()
+        return
+
+    if not category:
+        print("No category entered.")
+        return
+
+    print("Enter rule text:")
+    try:
+        rule_text = input("> ").strip()
+    except EOFError:
+        print()
+        return
+
+    if not rule_text:
+        print("No rule text entered.")
+        return
+
+    try:
+        append_world_rule(category, rule_text)
+    except (OSError, ValueError) as exc:
+        print(f"World rule could not be saved: {exc}")
+        return
+
+    print(f"World rule saved to {WORLD_RULES_PATH}.")
+
+
 # ============================================================
 # Main application loop
 # ============================================================
@@ -994,6 +1067,7 @@ def print_help() -> None:
     print("  /proofread")
     print("  /build-book")
     print("  /ideas")
+    print("  /world-add")
     print("  /help")
     print("  exit")
 
@@ -1018,6 +1092,7 @@ def main() -> None:
         "/proofread": lambda: handle_proofread(client),
         "/build-book": handle_build_book,
         "/ideas": handle_ideas,
+        "/world-add": handle_world_add,
         "/help": print_help,
     }
 
