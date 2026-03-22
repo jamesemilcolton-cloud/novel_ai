@@ -20,6 +20,7 @@ PROJECT_ANALYSIS_DIR = NOVEL_PROJECT_DIR / "analysis"
 CHAPTERS_DIR = NOVEL_PROJECT_DIR / "chapters"
 MANUSCRIPT_DIR = NOVEL_PROJECT_DIR / "manuscript"
 MANUSCRIPT_PATH = MANUSCRIPT_DIR / "novel.txt"
+CLEAN_MANUSCRIPT_PATH = MANUSCRIPT_DIR / "novel_clean.txt"
 CONTINUITY_REPORTS_DIR = PROJECT_ANALYSIS_DIR / "continuity_reports"
 REBUILD_LOG_DIR = PROJECT_ANALYSIS_DIR / "rebuild_logs"
 CANON_MEMORY_PATH = PROJECT_MEMORY_DIR / "canon_memory.txt"
@@ -470,6 +471,49 @@ def build_manuscript_text(chapter_paths: list[Path]) -> str:
         )
 
     return "\n\n".join(sections) + ("\n\n" if sections else "")
+
+
+def clean_manuscript_text(text: str) -> str:
+    """Normalize chapter text for clean manuscript output."""
+    cleaned_text = ANSI_ESCAPE_PATTERN.sub("", text)
+    cleaned_text = BRACKETED_PASTE_PATTERN.sub("", cleaned_text)
+    cleaned_text = DISALLOWED_CONTROL_CHAR_PATTERN.sub("", cleaned_text)
+
+    cleaned_lines: list[str] = []
+    previous_blank = False
+
+    for raw_line in cleaned_text.splitlines():
+        stripped_line = raw_line.rstrip()
+
+        if re.fullmatch(r"[-=*]{3,}", stripped_line.strip()):
+            continue
+
+        if not stripped_line.strip():
+            if previous_blank:
+                continue
+            cleaned_lines.append("")
+            previous_blank = True
+            continue
+
+        cleaned_lines.append(stripped_line)
+        previous_blank = False
+
+    return "\n".join(cleaned_lines).strip()
+
+
+def build_clean_manuscript_text(chapter_paths: list[Path]) -> str:
+    """Compile chapter files into a cleaned manuscript string."""
+    sections: list[str] = []
+
+    for path in chapter_paths:
+        chapter_number = extract_chapter_number(path)
+        if chapter_number is None:
+            continue
+
+        chapter_text = clean_manuscript_text(path.read_text(encoding="utf-8"))
+        sections.append(f"CHAPTER {chapter_number}\n\n{chapter_text}".rstrip())
+
+    return "\n\n\n".join(sections) + ("\n" if sections else "")
 
 
 # ============================================================
@@ -1078,27 +1122,32 @@ def handle_idea_suggest(client: Any) -> None:
 
 
 
-def handle_build_book() -> None:
-    """Compile all numbered chapter files into a single manuscript file."""
+def handle_build_book(clean: bool = False) -> None:
+    """Compile all numbered chapter files into a manuscript file."""
     if not CHAPTERS_DIR.exists():
-        print("No chapter files found.")
+        print("No chapters found." if clean else "No chapter files found.")
         return
 
     chapter_paths = load_sorted_chapter_paths()
     if not chapter_paths:
-        print("No chapter files found.")
+        print("No chapters found." if clean else "No chapter files found.")
         return
 
-    manuscript_text = build_manuscript_text(chapter_paths)
+    manuscript_text = (
+        build_clean_manuscript_text(chapter_paths)
+        if clean
+        else build_manuscript_text(chapter_paths)
+    )
+    output_path = CLEAN_MANUSCRIPT_PATH if clean else MANUSCRIPT_PATH
 
     try:
         MANUSCRIPT_DIR.mkdir(parents=True, exist_ok=True)
-        MANUSCRIPT_PATH.write_text(manuscript_text, encoding="utf-8")
+        output_path.write_text(manuscript_text, encoding="utf-8")
     except OSError as exc:
         print(f"Manuscript build failed: {exc}")
         return
 
-    print("Manuscript built successfully.")
+    print("Clean manuscript built successfully." if clean else "Manuscript built successfully.")
 
 
 
@@ -1175,6 +1224,7 @@ def print_help() -> None:
     print("  /proofread")
     print("  /idea-suggest")
     print("  /build-book")
+    print("  /build-book --clean")
     print("  /ideas")
     print("  /world-add")
     print("  /help")
@@ -1225,6 +1275,10 @@ def main() -> None:
         if user_input.lower() == "exit":
             print("Goodbye.")
             break
+
+        if user_input == "/build-book --clean":
+            handle_build_book(clean=True)
+            continue
 
         if user_input in command_handlers:
             command_handlers[user_input]()
