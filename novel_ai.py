@@ -732,6 +732,19 @@ def prompt_for_chapter_number(prompt_text: str = "Chapter number?") -> int | Non
 
 
 
+def prompt_for_confirmation(prompt_text: str) -> bool:
+    """Ask the user a yes/no question and return True for yes."""
+    print(prompt_text)
+    try:
+        response = input("> ").strip().lower()
+    except EOFError:
+        print()
+        return False
+
+    return response == "y"
+
+
+
 def parse_memory_suggestions(result: str) -> list[tuple[int, str, str]]:
     """Parse numbered memory suggestions from the scene extractor output."""
     suggestions: list[tuple[int, str, str]] = []
@@ -1386,6 +1399,49 @@ def handle_world_add() -> None:
     print(f"World rule saved to {WORLD_RULES_PATH}.")
 
 
+
+def handle_export_chapter() -> None:
+    """Prepare a chapter text file for manual WordGrinder export."""
+    ensure_project_files()
+    chapter_number = prompt_for_chapter_number()
+    if chapter_number is None:
+        return
+
+    export_path = CHAPTERS_DIR / f"chapter_{chapter_number}.txt"
+    if export_path.exists() and not prompt_for_confirmation(
+        "Overwrite existing export? (y/n)"
+    ):
+        print("Export cancelled.")
+        return
+
+    try:
+        atomic_write(export_path, "")
+    except OSError as exc:
+        print(f"Could not prepare export file: {exc}")
+        return
+
+    print()
+    print("Now open your WordGrinder chapter and press:")
+    print("CTRL+SHIFT+E (export)")
+    print("Choose:")
+    print("Plain Text")
+    print("Save to:")
+    print(export_path)
+    print()
+    print("Press ENTER after exporting the chapter.")
+
+    try:
+        input()
+    except EOFError:
+        print()
+
+    if export_path.exists():
+        print("Chapter export complete.")
+        return
+
+    print("Chapter export file was not found.")
+
+
 # ============================================================
 # Main application loop
 # ============================================================
@@ -1413,6 +1469,7 @@ def print_help() -> None:
     print("  /build-book --clean")
     print("  /ideas")
     print("  /world-add")
+    print("  /export-chapter")
     print("  /help")
     print("  exit")
 
@@ -1439,6 +1496,7 @@ def main() -> None:
         "/build-book": handle_build_book,
         "/ideas": handle_ideas,
         "/world-add": handle_world_add,
+        "/export-chapter": handle_export_chapter,
         "/help": print_help,
     }
 
