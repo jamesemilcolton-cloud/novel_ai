@@ -52,6 +52,17 @@ Be creative, clear, and practical.
 Do not invent persistent facts unless the user states them.
 """
 
+SCREENPLAY_SOURCE_PATH = NOVEL_PROJECT_DIR / "sources" / "screenplay.pdf"
+ALLOWED_MEMORY_CATEGORIES = (
+    "Character",
+    "Timeline",
+    "World",
+    "Object",
+    "Relationship",
+    "Injury",
+    "Location",
+)
+
 SCENE_SYSTEM_PROMPT = """You are a strict isolated extraction tool for a novel-writing project.
 
 Your job is to read ONLY the pasted scene text from this one request and extract possible canon memory facts.
@@ -79,6 +90,46 @@ Memory suggestions:
 
 None
 - Return ONLY the Memory suggestions output.
+"""
+
+SCENE_SUMMARY_SYSTEM_PROMPT = """You are a strict isolated Narrative Analysis Engine for a novel-writing project.
+
+You must analyze ONLY the material provided in this single request.
+You must ignore chat history and never rely on prior conversation state.
+Do not provide general writing advice, critique, or rewriting.
+Use the canon memory, previous chapter summaries, and screenplay text only as reference material for comparison.
+Do not invent unsupported facts.
+
+Return output in this exact structure and order:
+
+MEMORY SUGGESTIONS
+
+1. Fact text → [Category]
+2. Fact text → [Category]
+
+CHAPTER STRUCTURE NOTE
+
+<one of the required chapter-ending decisions>
+
+SCREENPLAY ALIGNMENT NOTE
+
+<alignment note>
+
+Rules for MEMORY SUGGESTIONS:
+- Use a numbered list.
+- Use short, concrete canon facts from the scene only.
+- Every suggestion must use exactly one of these categories: Character, Timeline, World, Object, Relationship, Injury, Location.
+- If there are no strong canon facts, write exactly: None
+
+Rules for CHAPTER STRUCTURE NOTE:
+- Decide whether the scene creates a location shift, tension pivot, emotional resolution, or narrative turn.
+- If yes, return exactly: This could be a natural chapter ending.
+- Otherwise return exactly: This scene continues the same narrative tension. Likely NOT a chapter ending point.
+
+Rules for SCREENPLAY ALIGNMENT NOTE:
+- If screenplay text is not provided, say exactly: No screenplay source available for comparison.
+- If screenplay text is provided and the scene diverges, briefly explain the divergence in motivation or events.
+- If screenplay text is provided and aligned, say exactly: Scene remains consistent with screenplay intent.
 """
 
 CONTINUITY_SYSTEM_PROMPT = """You are a strict continuity editor for a novel project.
@@ -186,6 +237,32 @@ def read_text_file(path: Path) -> str:
 
 
 
+def load_pdf_text(path: Path) -> str:
+    """Extract text from a PDF if possible, otherwise return a fallback note."""
+    if not path.exists() or not path.is_file():
+        return ""
+
+    try:
+        from pypdf import PdfReader
+    except ImportError:
+        try:
+            from PyPDF2 import PdfReader
+        except ImportError:
+            return "(screenplay PDF exists but no PDF reader library is installed)"
+
+    try:
+        reader = PdfReader(str(path))
+        pages = []
+        for page in reader.pages:
+            page_text = page.extract_text() or ""
+            cleaned_page_text = page_text.strip()
+            if cleaned_page_text:
+                pages.append(cleaned_page_text)
+        return "\n\n".join(pages).strip()
+    except Exception as exc:
+        return f"(could not read screenplay PDF: {exc})"
+
+
 def load_memory_block() -> str:
     """Load canonical story memory for the main assistant and continuity checker."""
     return read_text_file(CANON_MEMORY_PATH)
@@ -203,6 +280,18 @@ def load_ideas_block() -> str:
     if not IDEAS_PATH.exists():
         return ""
     return IDEAS_PATH.read_text(encoding="utf-8").strip()
+
+
+def load_previous_scene_summaries_block() -> str:
+    """Load previous scene summaries for isolated narrative analysis context."""
+    if not SCENE_SUMMARIES_PATH.exists():
+        return ""
+    return SCENE_SUMMARIES_PATH.read_text(encoding="utf-8").strip()
+
+
+def load_screenplay_block() -> str:
+    """Load screenplay source text from PDF when available."""
+    return load_pdf_text(SCREENPLAY_SOURCE_PATH)
 
 
 
@@ -320,22 +409,26 @@ def append_to_canon_memory(
     for fact, category in cleaned_facts:
         target_chapter["categories"].setdefault(category, []).append(fact)
 
+    chapters.sort(key=lambda chapter: chapter["number"])
     CANON_MEMORY_PATH.write_text(render_canon_memory(chapters), encoding="utf-8")
     print(f"Saved {len(cleaned_facts)} canon fact(s) to {CANON_MEMORY_PATH}.")
 
 
 
 def append_scene_summary(chapter_number: int, summary_text: str) -> None:
-    """Append scene extraction output to the non-canonical storage log."""
+    """Append full narrative analysis output to the scene summaries log."""
     ensure_project_files()
     cleaned_summary = summary_text.strip()
     if not cleaned_summary:
         return
 
+    divider = "=" * 40
+    entry = f"{divider}\nCHAPTER {chapter_number}\n{divider}\n{cleaned_summary}\n"
+
     with SCENE_SUMMARIES_PATH.open("a", encoding="utf-8") as file:
         if SCENE_SUMMARIES_PATH.stat().st_size > 0:
-            file.write("\n\n" + ("-" * 40) + "\n\n")
-        file.write(f"CHAPTER {chapter_number}\n\n{cleaned_summary}\n")
+            file.write("\n")
+        file.write(entry)
 
 
 
@@ -580,6 +673,8 @@ def parse_memory_suggestions(result: str) -> list[tuple[int, str, str]]:
         number = int(match.group(1))
         fact = match.group(2).strip()
         category = match.group(3).strip()
+        if category not in ALLOWED_MEMORY_CATEGORIES:
+            continue
         suggestions.append((number, fact, category))
     return suggestions
 
@@ -676,8 +771,10 @@ def build_main_messages(
 
 
 
-def build_scene_messages(scene_text: str) -> list[dict[str, str]]:
-    """Build the isolated message list for scene analysis."""
+def build_scene_messages(
+    scene_text: str,
+) -> list[dict[str, str]]:
+    """Build the isolated message list for scene extraction."""
     return [
         {
             "role": "system",
@@ -686,6 +783,35 @@ def build_scene_messages(scene_text: str) -> list[dict[str, str]]:
         {
             "role": "user",
             "content": scene_text,
+        },
+    ]
+
+
+def build_scene_summary_messages(
+    scene_text: str,
+    canon_memory_block: str,
+    previous_summaries_block: str,
+    screenplay_block: str,
+) -> list[dict[str, str]]:
+    """Build the isolated message list for narrative scene analysis."""
+    screenplay_text = screenplay_block.strip() if screenplay_block.strip() else "(none)"
+    previous_summaries_text = (
+        previous_summaries_block.strip() if previous_summaries_block.strip() else "(none)"
+    )
+
+    return [
+        {
+            "role": "system",
+            "content": SCENE_SUMMARY_SYSTEM_PROMPT,
+        },
+        {
+            "role": "user",
+            "content": (
+                f"Scene text:\n\n{scene_text}\n\n"
+                f"Canon memory:\n\n{canon_memory_block}\n\n"
+                f"Previous chapter summaries:\n\n{previous_summaries_text}\n\n"
+                f"Screenplay text:\n\n{screenplay_text}"
+            ),
         },
     ]
 
@@ -778,11 +904,12 @@ def extract_memory_suggestions_for_text(
 
 def handle_scene_summary(client: Any) -> None:
     """Analyse one pasted scene in a fully isolated request."""
+    ensure_project_files()
     chapter_number = prompt_for_chapter_number()
     if chapter_number is None:
         return
 
-    print("Paste scene. Type END when finished.")
+    print("Paste scene. Type END on new line when finished.")
     scene_text = collect_multiline_input(end_marker="END")
     scene_text = clean_terminal_text(scene_text)
 
@@ -790,22 +917,23 @@ def handle_scene_summary(client: Any) -> None:
         print("No scene entered.")
         return
 
+    canon_memory_block = load_memory_block()
+    previous_summaries_block = load_previous_scene_summaries_block()
+    screenplay_block = load_screenplay_block()
+
     try:
         result = request_chat_completion(
             client=client,
-            messages=build_scene_messages(scene_text),
+            messages=build_scene_summary_messages(
+                scene_text=scene_text,
+                canon_memory_block=canon_memory_block,
+                previous_summaries_block=previous_summaries_block,
+                screenplay_block=screenplay_block,
+            ),
             temperature=SCENE_TEMPERATURE,
         )
     except Exception as exc:  # Keep terminal app stable for the user.
         print(f"Scene summary failed: {exc}")
-        return
-
-    try:
-        append_scene_summary(chapter_number, result)
-    except OSError as exc:
-        print(f"Scene summary generated, but could not save log: {exc}")
-        print()
-        print(result)
         return
 
     print()
@@ -813,33 +941,37 @@ def handle_scene_summary(client: Any) -> None:
 
     suggestions = parse_memory_suggestions(result)
     if not suggestions:
-        print(f"\nScene summary log saved to {SCENE_SUMMARIES_PATH}.")
-        print("No structured canon suggestions found. Nothing saved.")
-        return
-
-    selection_numbers = prompt_for_selection(max(number for number, _, _ in suggestions))
-    if selection_numbers is None:
-        print(f"Scene summary log saved to {SCENE_SUMMARIES_PATH}.")
-        print("Nothing saved.")
-        return
-
-    selected_lookup = {number for number in selection_numbers}
-    selected_facts = [
-        (fact, category)
-        for number, fact, category in suggestions
-        if number in selected_lookup
-    ]
-
-    if selected_facts:
-        try:
-            append_to_canon_memory(chapter_number, selected_facts)
-        except OSError as exc:
-            print(f"Could not save canon memory: {exc}")
-            return
+        print("\nNo structured canon suggestions found. Nothing saved.")
     else:
-        print("Nothing saved.")
+        selection_numbers = prompt_for_selection(
+            max(number for number, _, _ in suggestions)
+        )
+        if selection_numbers is None:
+            print("Nothing saved.")
+        else:
+            selected_lookup = {number for number in selection_numbers}
+            selected_facts = [
+                (fact, category)
+                for number, fact, category in suggestions
+                if number in selected_lookup
+            ]
 
-    print(f"Scene summary log saved to {SCENE_SUMMARIES_PATH}.")
+            if selected_facts:
+                try:
+                    append_to_canon_memory(chapter_number, selected_facts)
+                except OSError as exc:
+                    print(f"Could not save canon memory: {exc}")
+                    return
+            else:
+                print("Nothing saved.")
+
+    try:
+        append_scene_summary(chapter_number, result)
+    except OSError as exc:
+        print(f"Narrative analysis generated, but could not save log: {exc}")
+        return
+
+    print(f"Narrative analysis log saved to {SCENE_SUMMARIES_PATH}.")
 
 
 
