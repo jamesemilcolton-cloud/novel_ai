@@ -972,37 +972,60 @@ def extract_memory_suggestions_for_text(
 
 
 def handle_new_chapter() -> None:
-    """Create the next numbered chapter file and open it in WordGrinder."""
+    """Create the next numbered WordGrinder chapter pair and open the .wg file."""
     ensure_project_files()
-    chapter_paths = load_sorted_chapter_paths()
+    chapter_pattern = re.compile(r"^chapter_(\d+)\.(?:wg|txt)$")
+    highest_chapter_number = 0
 
-    if not chapter_paths:
-        next_chapter_number = 1
-    else:
-        latest_number = extract_chapter_number(chapter_paths[-1])
-        if latest_number is None:
-            print("Could not determine latest chapter number.")
-            return
-        next_chapter_number = latest_number + 1
+    try:
+        for chapter_path in CHAPTERS_DIR.iterdir():
+            match = chapter_pattern.match(chapter_path.name)
+            if not match:
+                continue
+            chapter_number = int(match.group(1))
+            highest_chapter_number = max(highest_chapter_number, chapter_number)
+    except OSError as exc:
+        print(f"Could not scan chapter directory: {exc}")
+        return
 
-    chapter_path = CHAPTERS_DIR / f"chapter_{next_chapter_number}.txt"
-    if chapter_path.exists():
-        print(f"Chapter file already exists: {chapter_path}")
+    next_chapter_number = highest_chapter_number + 1
+    wg_path = CHAPTERS_DIR / f"chapter_{next_chapter_number}.wg"
+    txt_path = CHAPTERS_DIR / f"chapter_{next_chapter_number}.txt"
+
+    if wg_path.exists() or txt_path.exists():
+        print(f"Chapter files already exist: {wg_path} / {txt_path}")
         return
 
     try:
-        chapter_path.touch(exist_ok=False)
+        wg_path.touch(exist_ok=False)
+        txt_path.touch(exist_ok=False)
     except OSError as exc:
-        print(f"Could not create chapter file: {exc}")
+        if wg_path.exists() and not txt_path.exists():
+            try:
+                wg_path.unlink()
+            except OSError:
+                pass
+        print(f"Could not create chapter files: {exc}")
         return
+
+    chosen_theme = os.getenv(
+        "KITTY_CONFIG",
+        str(Path.home() / ".config" / "kitty" / "kitty.conf"),
+    )
 
     try:
-        subprocess.run(["wordgrinder", str(chapter_path)])
+        subprocess.Popen([
+            "kitty",
+            "--config",
+            chosen_theme,
+            "wordgrinder",
+            str(wg_path),
+        ])
     except OSError as exc:
-        print(f"Chapter created, but WordGrinder could not be launched: {exc}")
+        print(f"Chapter files created, but WordGrinder could not be launched: {exc}")
         return
 
-    print(f"Created and opened {chapter_path}.")
+    print(f"Created chapter_{next_chapter_number}.wg and chapter_{next_chapter_number}.txt")
 
 
 def handle_scene_summary(client: Any) -> None:
