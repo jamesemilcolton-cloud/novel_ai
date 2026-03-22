@@ -246,10 +246,24 @@ No rewriting."""
 def ensure_project_files() -> None:
     """Create the expected project folders and files if they do not already exist."""
     PROJECT_MEMORY_DIR.mkdir(parents=True, exist_ok=True)
+    PROJECT_ANALYSIS_DIR.mkdir(parents=True, exist_ok=True)
+    CHAPTERS_DIR.mkdir(parents=True, exist_ok=True)
+    MANUSCRIPT_DIR.mkdir(parents=True, exist_ok=True)
+    (NOVEL_PROJECT_DIR / "sources").mkdir(parents=True, exist_ok=True)
     CONTINUITY_REPORTS_DIR.mkdir(parents=True, exist_ok=True)
     REBUILD_LOG_DIR.mkdir(parents=True, exist_ok=True)
     CANON_MEMORY_PATH.touch(exist_ok=True)
     SCENE_SUMMARIES_PATH.touch(exist_ok=True)
+    IDEAS_PATH.touch(exist_ok=True)
+    WORLD_RULES_PATH.touch(exist_ok=True)
+
+
+
+def atomic_write(path: Path, text: str) -> None:
+    """Write text to a temporary file and atomically replace the destination."""
+    tmp = path.with_suffix(path.suffix + ".tmp")
+    tmp.write_text(text, encoding="utf-8")
+    tmp.replace(path)
 
 
 
@@ -429,12 +443,21 @@ def append_to_canon_memory(
         target_chapter = {"number": chapter_number, "categories": OrderedDict()}
         chapters.append(target_chapter)
 
+    saved_count = 0
     for fact, category in cleaned_facts:
-        target_chapter["categories"].setdefault(category, []).append(fact)
+        category_facts = target_chapter["categories"].setdefault(category, [])
+        if fact in category_facts:
+            continue
+        category_facts.append(fact)
+        saved_count += 1
+
+    if saved_count == 0:
+        print("No new canon facts selected to save.")
+        return
 
     chapters.sort(key=lambda chapter: chapter["number"])
-    CANON_MEMORY_PATH.write_text(render_canon_memory(chapters), encoding="utf-8")
-    print(f"Saved {len(cleaned_facts)} canon fact(s) to {CANON_MEMORY_PATH}.")
+    atomic_write(CANON_MEMORY_PATH, render_canon_memory(chapters))
+    print(f"Saved {saved_count} canon fact(s) to {CANON_MEMORY_PATH}.")
 
 
 
@@ -518,7 +541,7 @@ def write_rebuild_log(
 ) -> Path:
     """Write a rebuild log file and return its path."""
     timestamp = datetime.utcnow()
-    log_path = REBUILD_LOG_DIR / f"rebuild_{timestamp.strftime('%Y%m%d_%H%M')}.txt"
+    log_path = REBUILD_LOG_DIR / f"rebuild_{timestamp.strftime('%Y%m%d_%H%M%S')}.txt"
     content = "\n".join(
         [
             f"mode: {mode}",
@@ -526,7 +549,7 @@ def write_rebuild_log(
             f"timestamp: {timestamp.strftime('%Y-%m-%d %H:%M:%S UTC')}",
         ]
     )
-    log_path.write_text(content + "\n", encoding="utf-8")
+    atomic_write(log_path, content + "\n")
     return log_path
 
 
@@ -1035,7 +1058,7 @@ def handle_continuity_check(client: Any) -> None:
         for path in chapter_paths
         if extract_chapter_number(path) is not None
         and extract_chapter_number(path) < selected_number
-    ]
+    ][-5:]
 
     memory_block = load_memory_block()
     world_rules_block = load_world_rules_block()
@@ -1061,7 +1084,7 @@ def handle_continuity_check(client: Any) -> None:
 
     report_path = CONTINUITY_REPORTS_DIR / f"{selected_path.stem}_report.txt"
     try:
-        report_path.write_text(report + "\n", encoding="utf-8")
+        atomic_write(report_path, report + "\n")
     except OSError as exc:
         print(f"Continuity report could not be saved: {exc}")
         return
@@ -1122,9 +1145,9 @@ def handle_rebuild_memory(client: Any) -> None:
         rebuilt_chapters.sort(key=lambda chapter: chapter["number"])
 
         try:
-            CANON_MEMORY_PATH.write_text(
+            atomic_write(
+                CANON_MEMORY_PATH,
                 render_canon_memory(rebuilt_chapters),
-                encoding="utf-8",
             )
             log_path = write_rebuild_log(
                 mode="FULL",
@@ -1176,7 +1199,7 @@ def handle_rebuild_memory(client: Any) -> None:
         chapters = insert_or_replace_chapter_block(chapters, rebuilt_chapter)
 
         try:
-            CANON_MEMORY_PATH.write_text(render_canon_memory(chapters), encoding="utf-8")
+            atomic_write(CANON_MEMORY_PATH, render_canon_memory(chapters))
             log_path = write_rebuild_log(
                 mode="SINGLE",
                 lines=[
@@ -1285,7 +1308,7 @@ def handle_build_book(clean: bool = False) -> None:
 
     try:
         MANUSCRIPT_DIR.mkdir(parents=True, exist_ok=True)
-        output_path.write_text(manuscript_text, encoding="utf-8")
+        atomic_write(output_path, manuscript_text)
     except OSError as exc:
         print(f"Manuscript build failed: {exc}")
         return
