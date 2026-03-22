@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import os
 import re
-import subprocess
 from collections import OrderedDict
 from datetime import datetime
 from pathlib import Path
@@ -971,57 +970,6 @@ def extract_memory_suggestions_for_text(
 # ============================================================
 
 
-def handle_new_chapter() -> None:
-    """Create the next numbered WordGrinder chapter pair and open the .wg file."""
-    ensure_project_files()
-    chapter_pattern = re.compile(r"^chapter_(\d+)\.(?:wg|txt)$")
-    highest_chapter_number = 0
-
-    try:
-        for chapter_path in CHAPTERS_DIR.iterdir():
-            match = chapter_pattern.match(chapter_path.name)
-            if not match:
-                continue
-            chapter_number = int(match.group(1))
-            highest_chapter_number = max(highest_chapter_number, chapter_number)
-    except OSError as exc:
-        print(f"Could not scan chapter directory: {exc}")
-        return
-
-    next_chapter_number = highest_chapter_number + 1
-    wg_path = CHAPTERS_DIR / f"chapter_{next_chapter_number}.wg"
-    txt_path = CHAPTERS_DIR / f"chapter_{next_chapter_number}.txt"
-
-    if wg_path.exists() or txt_path.exists():
-        print(f"Chapter files already exist: {wg_path} / {txt_path}")
-        return
-
-    try:
-        txt_path.touch(exist_ok=False)
-    except OSError as exc:
-        print(f"Could not create chapter files: {exc}")
-        return
-
-    chosen_theme = os.getenv(
-        "KITTY_CONFIG",
-        str(Path.home() / ".config" / "kitty" / "kitty.conf"),
-    )
-
-    try:
-        subprocess.Popen([
-            "kitty",
-            "--config",
-            chosen_theme,
-            "wordgrinder",
-            str(wg_path),
-        ])
-    except OSError as exc:
-        print(f"Chapter text file created, but WordGrinder could not be launched: {exc}")
-        return
-
-    print(f"Opening new chapter in WordGrinder: chapter_{next_chapter_number}.wg")
-
-
 def handle_scene_summary(client: Any) -> None:
     """Analyse one pasted scene in a fully isolated request."""
     ensure_project_files()
@@ -1465,7 +1413,6 @@ def print_help() -> None:
     print("  /build-book --clean")
     print("  /ideas")
     print("  /world-add")
-    print("  /new-chapter")
     print("  /help")
     print("  exit")
 
@@ -1492,7 +1439,6 @@ def main() -> None:
         "/build-book": handle_build_book,
         "/ideas": handle_ideas,
         "/world-add": handle_world_add,
-        "/new-chapter": handle_new_chapter,
         "/help": print_help,
     }
 
