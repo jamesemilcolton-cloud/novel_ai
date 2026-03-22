@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import os
 import re
+import subprocess
 from collections import OrderedDict
 from datetime import datetime
 from pathlib import Path
@@ -950,6 +951,40 @@ def extract_memory_suggestions_for_text(
 # ============================================================
 
 
+def handle_new_chapter() -> None:
+    """Create the next numbered chapter file and open it in WordGrinder."""
+    ensure_project_files()
+    chapter_paths = load_sorted_chapter_paths()
+
+    if not chapter_paths:
+        next_chapter_number = 1
+    else:
+        latest_number = extract_chapter_number(chapter_paths[-1])
+        if latest_number is None:
+            print("Could not determine latest chapter number.")
+            return
+        next_chapter_number = latest_number + 1
+
+    chapter_path = CHAPTERS_DIR / f"chapter_{next_chapter_number}.txt"
+    if chapter_path.exists():
+        print(f"Chapter file already exists: {chapter_path}")
+        return
+
+    try:
+        chapter_path.touch(exist_ok=False)
+    except OSError as exc:
+        print(f"Could not create chapter file: {exc}")
+        return
+
+    try:
+        subprocess.run(["wordgrinder", str(chapter_path)])
+    except OSError as exc:
+        print(f"Chapter created, but WordGrinder could not be launched: {exc}")
+        return
+
+    print(f"Created and opened {chapter_path}.")
+
+
 def handle_scene_summary(client: Any) -> None:
     """Analyse one pasted scene in a fully isolated request."""
     ensure_project_files()
@@ -1393,6 +1428,7 @@ def print_help() -> None:
     print("  /build-book --clean")
     print("  /ideas")
     print("  /world-add")
+    print("  /new-chapter")
     print("  /help")
     print("  exit")
 
@@ -1419,6 +1455,7 @@ def main() -> None:
         "/build-book": handle_build_book,
         "/ideas": handle_ideas,
         "/world-add": handle_world_add,
+        "/new-chapter": handle_new_chapter,
         "/help": print_help,
     }
 
