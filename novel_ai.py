@@ -44,6 +44,7 @@ SCENE_TEMPERATURE = 0.1
 CONTINUITY_TEMPERATURE = 0.0
 PROOFREAD_TEMPERATURE = 0.1
 IDEA_SUGGEST_TEMPERATURE = 0.4
+IDEA_RESURFACE_TEMPERATURE = 0.3
 
 MAIN_SYSTEM_PROMPT = """You are a thoughtful AI novel-writing assistant.
 Help the user think through story ideas, scenes, structure, tone, character, and prose.
@@ -162,6 +163,39 @@ IDEA SUGGESTIONS
 1. idea → short reason
 2. idea → short reason
 """
+
+IDEA_RESURFACE_SYSTEM_PROMPT = """You are a strategic story editor.
+
+Your job is to:
+- Read the current chapter
+- Read full canon memory
+- Read the list of stored ideas
+
+Then:
+
+Select ONLY ideas that strongly fit the story at this point.
+
+STRICT RULES:
+- Do NOT force ideas
+- Do NOT suggest weak connections
+- Do NOT suggest ideas that don't naturally fit
+- If confidence is low, return:
+
+No ideas that could work here.
+
+If ideas DO fit:
+
+Return:
+
+IDEA RESURFACING
+
+1. <idea text> → <short reason why it fits now>
+2. <idea text> → <short reason why it fits now>
+
+Be concise.
+No fluff.
+No writing advice.
+No rewriting."""
 
 
 # ============================================================
@@ -547,9 +581,9 @@ def collect_multiline_input(end_marker: str = "END") -> str:
 
 
 
-def prompt_for_chapter_number() -> int | None:
+def prompt_for_chapter_number(prompt_text: str = "Chapter number?") -> int | None:
     """Ask the user for a chapter number."""
-    print("Chapter number?")
+    print(prompt_text)
     try:
         raw_value = input("> ").strip()
     except EOFError:
@@ -747,6 +781,28 @@ def build_idea_suggest_messages(
                 f"Current chapter text:\n\n{chapter_text}\n\n"
                 f"Ideas list:\n\n{ideas_block}\n\n"
                 f"Canon memory:\n\n{canon_memory_block}"
+            ),
+        },
+    ]
+
+
+def build_idea_resurface_messages(
+    chapter_text: str,
+    canon_memory_block: str,
+    ideas_block: str,
+) -> list[dict[str, str]]:
+    """Build the message list for resurfacing highly relevant saved ideas."""
+    return [
+        {
+            "role": "system",
+            "content": IDEA_RESURFACE_SYSTEM_PROMPT,
+        },
+        {
+            "role": "user",
+            "content": (
+                f"Current chapter text:\n\n{chapter_text}\n\n"
+                f"Canon memory:\n\n{canon_memory_block}\n\n"
+                f"Stored ideas:\n\n{ideas_block}"
             ),
         },
     ]
@@ -1121,6 +1177,45 @@ def handle_idea_suggest(client: Any) -> None:
     print(result)
 
 
+def handle_idea_resurface(client: Any) -> None:
+    """Resurface only highly relevant saved ideas for the selected chapter."""
+    ensure_project_files()
+    chapter_number = prompt_for_chapter_number(prompt_text="Enter chapter number:")
+    if chapter_number is None:
+        return
+
+    chapter_path = CHAPTERS_DIR / f"chapter_{chapter_number}.txt"
+    if not chapter_path.exists() or not chapter_path.is_file():
+        print(f"Chapter file not found: {chapter_path}")
+        return
+
+    ideas_block = load_ideas_block()
+    if not ideas_block:
+        print("No ideas available.")
+        return
+
+    chapter_text = chapter_path.read_text(encoding="utf-8").strip()
+    canon_memory_block = load_memory_block()
+    messages = build_idea_resurface_messages(
+        chapter_text=chapter_text,
+        canon_memory_block=canon_memory_block,
+        ideas_block=ideas_block,
+    )
+
+    try:
+        result = request_chat_completion(
+            client=client,
+            messages=messages,
+            temperature=IDEA_RESURFACE_TEMPERATURE,
+        )
+    except Exception as exc:  # Keep terminal app stable for the user.
+        print(f"Idea resurfacing failed: {exc}")
+        return
+
+    print()
+    print(result)
+
+
 
 def handle_build_book(clean: bool = False) -> None:
     """Compile all numbered chapter files into a manuscript file."""
@@ -1223,6 +1318,7 @@ def print_help() -> None:
     print("  /continuity-check")
     print("  /proofread")
     print("  /idea-suggest")
+    print("  /idea-resurface")
     print("  /build-book")
     print("  /build-book --clean")
     print("  /ideas")
@@ -1250,6 +1346,7 @@ def main() -> None:
         "/continuity-check": lambda: handle_continuity_check(client),
         "/proofread": lambda: handle_proofread(client),
         "/idea-suggest": lambda: handle_idea_suggest(client),
+        "/idea-resurface": lambda: handle_idea_resurface(client),
         "/build-book": handle_build_book,
         "/ideas": handle_ideas,
         "/world-add": handle_world_add,
