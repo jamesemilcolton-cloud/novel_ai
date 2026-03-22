@@ -24,6 +24,7 @@ CONTINUITY_REPORTS_DIR = PROJECT_ANALYSIS_DIR / "continuity_reports"
 REBUILD_LOG_DIR = PROJECT_ANALYSIS_DIR / "rebuild_logs"
 CANON_MEMORY_PATH = PROJECT_MEMORY_DIR / "canon_memory.txt"
 SCENE_SUMMARIES_PATH = PROJECT_MEMORY_DIR / "scene_summaries.txt"
+IDEAS_PATH = PROJECT_MEMORY_DIR / "ideas.txt"
 CHAPTER_FILENAME_PATTERN = re.compile(r"chapter_(\d+)\.txt$")
 SUGGESTION_PATTERN = re.compile(
     r"^\s*(\d+)\.\s*(.+?)\s*(?:→|->)\s*\[([^\]]+)\]\s*$",
@@ -234,6 +235,27 @@ def append_scene_summary(chapter_number: int, summary_text: str) -> None:
         if SCENE_SUMMARIES_PATH.stat().st_size > 0:
             file.write("\n\n" + ("-" * 40) + "\n\n")
         file.write(f"CHAPTER {chapter_number}\n\n{cleaned_summary}\n")
+
+
+
+def append_idea(text: str) -> None:
+    """Append a timestamped writing idea to the ideas log."""
+    PROJECT_MEMORY_DIR.mkdir(parents=True, exist_ok=True)
+    timestamp = datetime.now()
+    with IDEAS_PATH.open("a", encoding="utf-8") as file:
+        file.write(
+            "\n".join(
+                [
+                    "========================",
+                    timestamp.strftime("%Y-%m-%d %H:%M"),
+                    "========================",
+                    "Idea:",
+                    text.strip(),
+                    "",
+                    "",
+                ]
+            )
+        )
 
 
 
@@ -851,6 +873,22 @@ def handle_build_book() -> None:
     print("Manuscript built successfully.")
 
 
+
+def handle_ideas() -> None:
+    """Capture a freeform writing idea without affecting assistant state."""
+    print("Paste idea. Type END on a new line when finished.")
+    idea_text = collect_multiline_input(end_marker="END")
+
+    if not idea_text:
+        print("No idea entered.")
+        return
+
+    try:
+        append_idea(idea_text)
+    except OSError:
+        print("Idea could not be saved.")
+
+
 # ============================================================
 # Main application loop
 # ============================================================
@@ -873,6 +911,7 @@ def print_help() -> None:
     print("  /rebuild-memory")
     print("  /continuity-check")
     print("  /build-book")
+    print("  /ideas")
     print("  /help")
     print("  exit")
 
@@ -895,6 +934,7 @@ def main() -> None:
         "/rebuild-memory": lambda: handle_rebuild_memory(client),
         "/continuity-check": lambda: handle_continuity_check(client),
         "/build-book": handle_build_book,
+        "/ideas": handle_ideas,
         "/help": print_help,
     }
 
