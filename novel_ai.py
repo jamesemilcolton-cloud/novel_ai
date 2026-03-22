@@ -43,7 +43,6 @@ MAIN_TEMPERATURE = 0.8
 SCENE_TEMPERATURE = 0.1
 CONTINUITY_TEMPERATURE = 0.0
 PROOFREAD_TEMPERATURE = 0.1
-IDEA_SUGGEST_TEMPERATURE = 0.4
 IDEA_RESURFACE_TEMPERATURE = 0.3
 
 MAIN_SYSTEM_PROMPT = """You are a thoughtful AI novel-writing assistant.
@@ -192,28 +191,7 @@ VOCABULARY SUGGESTIONS
 - original → improved
 """
 
-IDEA_SUGGEST_SYSTEM_PROMPT = """You are an assistant helping a novelist integrate ideas.
 
-Your job:
-- Read the current chapter
-- Read the list of ideas
-- Suggest ONLY ideas that naturally fit the current story direction
-
-Rules:
-- Do NOT force ideas
-- Do NOT invent connections
-- Do NOT suggest irrelevant ideas
-- If no ideas fit, say exactly:
-
-No ideas that could work here.
-
-Return format:
-
-IDEA SUGGESTIONS
-
-1. idea → short reason
-2. idea → short reason
-"""
 
 IDEA_RESURFACE_SYSTEM_PROMPT = """You are a strategic story editor.
 
@@ -890,26 +868,6 @@ def build_proofread_messages(text_to_proofread: str) -> list[dict[str, str]]:
     ]
 
 
-def build_idea_suggest_messages(
-    chapter_text: str,
-    ideas_block: str,
-    canon_memory_block: str,
-) -> list[dict[str, str]]:
-    """Build the message list for suggesting relevant saved ideas."""
-    return [
-        {
-            "role": "system",
-            "content": IDEA_SUGGEST_SYSTEM_PROMPT,
-        },
-        {
-            "role": "user",
-            "content": (
-                f"Current chapter text:\n\n{chapter_text}\n\n"
-                f"Ideas list:\n\n{ideas_block}\n\n"
-                f"Canon memory:\n\n{canon_memory_block}"
-            ),
-        },
-    ]
 
 
 def build_idea_resurface_messages(
@@ -1254,59 +1212,6 @@ def handle_proofread(client: Any) -> None:
     print(result)
 
 
-def handle_idea_suggest(client: Any) -> None:
-    """Suggest saved ideas that fit the selected chapter."""
-    ensure_project_files()
-    print("Enter chapter number:")
-    try:
-        raw_value = input("> ").strip()
-    except EOFError:
-        print()
-        return
-
-    if not raw_value:
-        print("No chapter number entered.")
-        return
-
-    if not raw_value.isdigit():
-        print("Chapter number must be a positive integer.")
-        return
-
-    chapter_number = int(raw_value)
-    if chapter_number <= 0:
-        print("Chapter number must be a positive integer.")
-        return
-
-    chapter_path = CHAPTERS_DIR / f"chapter_{chapter_number}.txt"
-    if not chapter_path.exists() or not chapter_path.is_file():
-        print(f"Chapter file not found: {chapter_path}")
-        return
-
-    ideas_block = load_ideas_block()
-    if not ideas_block:
-        print("No ideas available.")
-        return
-
-    chapter_text = chapter_path.read_text(encoding="utf-8").strip()
-    canon_memory_block = load_memory_block()
-    messages = build_idea_suggest_messages(
-        chapter_text=chapter_text,
-        ideas_block=ideas_block,
-        canon_memory_block=canon_memory_block,
-    )
-
-    try:
-        result = request_chat_completion(
-            client=client,
-            messages=messages,
-            temperature=IDEA_SUGGEST_TEMPERATURE,
-        )
-    except Exception as exc:  # Keep terminal app stable for the user.
-        print(f"Idea suggestion failed: {exc}")
-        return
-
-    print()
-    print(result)
 
 
 def handle_idea_resurface(client: Any) -> None:
@@ -1449,7 +1354,6 @@ def print_help() -> None:
     print("  /rebuild-memory")
     print("  /continuity-check")
     print("  /proofread")
-    print("  /idea-suggest")
     print("  /idea-resurface")
     print("  /build-book")
     print("  /build-book --clean")
@@ -1477,7 +1381,6 @@ def main() -> None:
         "/rebuild-memory": lambda: handle_rebuild_memory(client),
         "/continuity-check": lambda: handle_continuity_check(client),
         "/proofread": lambda: handle_proofread(client),
-        "/idea-suggest": lambda: handle_idea_suggest(client),
         "/idea-resurface": lambda: handle_idea_resurface(client),
         "/build-book": handle_build_book,
         "/ideas": handle_ideas,
