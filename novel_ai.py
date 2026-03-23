@@ -620,6 +620,34 @@ def append_scene_summary(chapter_number: int, summary_text: str) -> None:
         file.write(entry)
 
 
+def remove_scene_summary_block(chapter_number: int) -> bool:
+    """Remove one chapter block from the scene summaries log if it exists."""
+    if not SCENE_SUMMARIES_PATH.exists():
+        return False
+
+    content = SCENE_SUMMARIES_PATH.read_text(encoding="utf-8")
+    if not content.strip():
+        return False
+
+    divider = "=" * 40
+    escaped_divider = re.escape(divider)
+    block_pattern = re.compile(
+        rf"(?:^|\n){escaped_divider}\nCHAPTER {chapter_number}\n{escaped_divider}\n.*?"
+        rf"(?=\n{escaped_divider}\nCHAPTER \d+\n{escaped_divider}\n|\Z)",
+        re.DOTALL,
+    )
+    updated_content, removals = block_pattern.subn("", content, count=1)
+    if removals == 0:
+        return False
+
+    normalized_content = updated_content.strip()
+    atomic_write(
+        SCENE_SUMMARIES_PATH,
+        (normalized_content + "\n") if normalized_content else "",
+    )
+    return True
+
+
 
 def append_idea(text: str) -> None:
     """Append a timestamped writing idea to the ideas log."""
@@ -1102,6 +1130,31 @@ def extract_memory_suggestions_for_text(
     return parse_memory_suggestions(result)
 
 
+def generate_scene_summary_for_chapter(
+    client: Any,
+    chapter_number: int,
+) -> str:
+    """Run the scene summary prompt for one chapter file."""
+    chapter_path = CHAPTERS_DIR / f"chapter_{chapter_number}.txt"
+    if not chapter_path.exists() or not chapter_path.is_file():
+        raise FileNotFoundError(f"Chapter file not found: {chapter_path}")
+
+    scene_text = clean_terminal_text(chapter_path.read_text(encoding="utf-8"))
+    if not scene_text:
+        raise ValueError(f"Chapter {chapter_number} is empty.")
+
+    return request_chat_completion(
+        client=client,
+        messages=build_scene_summary_messages(
+            scene_text=scene_text,
+            canon_memory_block=load_memory_block(),
+            previous_summaries_block=load_previous_scene_summaries_block(),
+            screenplay_block=load_screenplay_block(),
+        ),
+        temperature=SCENE_TEMPERATURE,
+    )
+
+
 
 # ============================================================
 # Command handlers
@@ -1380,6 +1433,96 @@ def handle_rebuild_memory(client: Any) -> None:
     print("Invalid selection. Enter 1 or 2.")
 
 
+def handle_rebuild_summaries(client: Any) -> None:
+    """Rebuild stored scene summaries from the current chapter files."""
+    ensure_project_files()
+    print("Rebuild summary options:")
+    print()
+    print("1) Full novel")
+    print("2) Single chapter")
+
+    try:
+        selection = input("> ").strip()
+    except EOFError:
+        print()
+        return
+
+    if selection == "1":
+        if not CHAPTERS_DIR.exists():
+            print(f"Missing chapters directory: {CHAPTERS_DIR}")
+            return
+
+        chapter_paths = load_sorted_chapter_paths()
+        if not chapter_paths:
+            print("No chapter files found.")
+            return
+
+        try:
+            atomic_write(SCENE_SUMMARIES_PATH, "")
+        except OSError as exc:
+            print(f"Could not clear scene summaries: {exc}")
+            return
+
+        for chapter_path in chapter_paths:
+            chapter_number = extract_chapter_number(chapter_path)
+            if chapter_number is None:
+                continue
+
+            print(f"Processing chapter {chapter_number}...")
+            try:
+                summary_text = generate_scene_summary_for_chapter(client, chapter_number)
+                append_scene_summary(chapter_number, summary_text)
+            except FileNotFoundError as exc:
+                print(exc)
+                continue
+            except ValueError as exc:
+                print(f"Skipped chapter {chapter_number}: {exc}")
+                continue
+            except Exception as exc:  # Keep terminal app stable for the user.
+                print(f"Rebuild summaries failed while processing chapter {chapter_number}: {exc}")
+                return
+
+        print(f"Scene summaries rebuilt at {SCENE_SUMMARIES_PATH}.")
+        return
+
+    if selection == "2":
+        chapter_number = prompt_for_chapter_number()
+        if chapter_number is None:
+            return
+
+        chapter_path = CHAPTERS_DIR / f"chapter_{chapter_number}.txt"
+        if not chapter_path.exists() or not chapter_path.is_file():
+            print(f"Chapter file not found: {chapter_path}")
+            return
+
+        try:
+            removed_existing = remove_scene_summary_block(chapter_number)
+            print(f"Processing chapter {chapter_number}...")
+            summary_text = generate_scene_summary_for_chapter(client, chapter_number)
+            append_scene_summary(chapter_number, summary_text)
+        except ValueError as exc:
+            print(f"Could not rebuild chapter {chapter_number}: {exc}")
+            return
+        except OSError as exc:
+            print(f"Could not update scene summaries: {exc}")
+            return
+        except Exception as exc:  # Keep terminal app stable for the user.
+            print(f"Single-chapter summary rebuild failed: {exc}")
+            return
+
+        if removed_existing:
+            print(f"Rebuilt scene summary for chapter {chapter_number}.")
+        else:
+            print(
+                f"No existing scene summary block found for chapter {chapter_number}. "
+                "Added a new one."
+            )
+        print(f"Scene summaries updated at {SCENE_SUMMARIES_PATH}.")
+        return
+
+    print("Invalid selection. Enter 1 or 2.")
+
+
 def handle_proofread(client: Any) -> None:
     """Proofread pasted text in a fully isolated request."""
     print("Paste text to proofread. Type END on a new line when finished.")
@@ -1586,6 +1729,7 @@ def print_help() -> None:
     """Show available commands."""
     print("Available commands:")
     print("  /scene-summary")
+    print("  /rebuild-summaries")
     print("  /rebuild-memory")
     print("  /continuity-check")
     print("  /proofread")
@@ -1614,6 +1758,7 @@ def main() -> None:
 
     command_handlers: dict[str, Callable[[], None]] = {
         "/scene-summary": lambda: handle_scene_summary(client),
+        "/rebuild-summaries": lambda: handle_rebuild_summaries(client),
         "/rebuild-memory": lambda: handle_rebuild_memory(client),
         "/continuity-check": lambda: handle_continuity_check(client),
         "/proofread": lambda: handle_proofread(client),
