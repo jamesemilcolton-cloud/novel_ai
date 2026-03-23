@@ -46,7 +46,7 @@ CONTINUITY_TEMPERATURE = 0.0
 PROOFREAD_TEMPERATURE = 0.1
 IDEA_RESURFACE_TEMPERATURE = 0.3
 
-MAX_PREVIOUS_CHAPTERS = 3
+CONTINUITY_CHAPTER_WINDOW = 3
 MAX_SCENE_SUMMARIES = 5
 MAX_CONVERSATION_TURNS = 6
 MAX_CANON_CHARACTERS = 12000
@@ -390,9 +390,11 @@ def load_pdf_text(path: Path) -> str:
         return f"(could not read screenplay PDF: {exc})"
 
 
-def load_memory_block() -> str:
+def load_memory_block(*, full: bool = False) -> str:
     """Load canonical story memory for the main assistant and continuity checker."""
     canon_text = read_text_file(CANON_MEMORY_PATH)
+    if full:
+        return canon_text
     if len(canon_text) > MAX_CANON_CHARACTERS:
         return canon_text[-MAX_CANON_CHARACTERS:]
     return canon_text
@@ -1350,19 +1352,15 @@ def handle_continuity_check(client: Any) -> None:
         print("Chapter not found.")
         return
 
-    selected_number = extract_chapter_number(selected_path)
-    if selected_number is None:
-        print("Invalid chapter filename format.")
-        return
+    selected_index = chapter_paths.index(selected_path)
+    previous_paths = chapter_paths[
+        max(0, selected_index - CONTINUITY_CHAPTER_WINDOW):selected_index
+    ]
+    print(
+        f"Using last {len(previous_paths)} chapters for continuity context."
+    )
 
-    previous_paths = [
-        path
-        for path in chapter_paths
-        if extract_chapter_number(path) is not None
-        and extract_chapter_number(path) < selected_number
-    ][-MAX_PREVIOUS_CHAPTERS:]
-
-    memory_block = load_memory_block()
+    memory_block = load_memory_block(full=True)
     world_rules_block = load_world_rules_block()
     previous_chapters_block = format_chapter_block(previous_paths)
     selected_chapter_text = selected_path.read_text(encoding="utf-8").strip()
