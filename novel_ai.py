@@ -54,16 +54,23 @@ Do not invent persistent facts unless the user states them.
 
 SCREENPLAY_SOURCE_PATH = NOVEL_PROJECT_DIR / "sources" / "screenplay.pdf"
 ALLOWED_MEMORY_CATEGORIES = (
-    "Mission State",
-    "Character State",
-    "Relationship Shift",
+    "Character",
+    "Relationship",
+    "World",
+    "Location",
+    "Object",
+    "Timeline",
     "Injury",
-    "Technology State",
-    "Location State",
+    "Mission State — Active",
+    "Mission State — Resolved",
+    "Psychological State — Active",
+    "Psychological State — Resolved",
+    "Relationship State — Active",
+    "Relationship State — Resolved",
+    "Technology State — Active",
+    "Technology State — Resolved",
     "Foreshadowing Setup",
-    "World Rule",
-    "Object Tracking",
-    "World Detail",
+    "Foreshadowing Payoff",
 )
 
 SCENE_SYSTEM_PROMPT = """You are a Canon Memory Extraction Engine for a long-form novel system.
