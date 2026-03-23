@@ -45,6 +45,11 @@ CONTINUITY_TEMPERATURE = 0.0
 PROOFREAD_TEMPERATURE = 0.1
 IDEA_RESURFACE_TEMPERATURE = 0.3
 
+MAX_PREVIOUS_CHAPTERS = 3
+MAX_SCENE_SUMMARIES = 5
+MAX_CONVERSATION_TURNS = 6
+MAX_CANON_CHARACTERS = 12000
+
 MAIN_SYSTEM_PROMPT = """You are a thoughtful AI novel-writing assistant.
 Help the user think through story ideas, scenes, structure, tone, character, and prose.
 Use the provided memory carefully and naturally.
@@ -386,7 +391,10 @@ def load_pdf_text(path: Path) -> str:
 
 def load_memory_block() -> str:
     """Load canonical story memory for the main assistant and continuity checker."""
-    return read_text_file(CANON_MEMORY_PATH)
+    canon_text = read_text_file(CANON_MEMORY_PATH)
+    if len(canon_text) > MAX_CANON_CHARACTERS:
+        return canon_text[-MAX_CANON_CHARACTERS:]
+    return canon_text
 
 
 def load_world_rules_block() -> str:
@@ -407,7 +415,26 @@ def load_previous_scene_summaries_block() -> str:
     """Load previous scene summaries for isolated narrative analysis context."""
     if not SCENE_SUMMARIES_PATH.exists():
         return ""
-    return SCENE_SUMMARIES_PATH.read_text(encoding="utf-8").strip()
+
+    divider = "=" * 40
+    summaries_text = SCENE_SUMMARIES_PATH.read_text(encoding="utf-8").strip()
+    if not summaries_text:
+        return ""
+
+    parts = summaries_text.split(divider)
+    entries: list[str] = []
+    index = 1
+    while index + 1 < len(parts):
+        header = parts[index].strip()
+        body = parts[index + 1].strip()
+        if header and body:
+            entries.append(f"{divider}\n{header}\n{divider}\n{body}")
+        index += 2
+
+    if not entries:
+        return summaries_text
+
+    return "\n\n".join(entries[-MAX_SCENE_SUMMARIES:])
 
 
 def load_screenplay_block() -> str:
@@ -1189,7 +1216,7 @@ def handle_continuity_check(client: Any) -> None:
         for path in chapter_paths
         if extract_chapter_number(path) is not None
         and extract_chapter_number(path) < selected_number
-    ][-5:]
+    ][-MAX_PREVIOUS_CHAPTERS:]
 
     memory_block = load_memory_block()
     world_rules_block = load_world_rules_block()
@@ -1627,6 +1654,7 @@ def main() -> None:
             continue
 
         memory_block = load_memory_block()
+        conversation_history = conversation_history[-MAX_CONVERSATION_TURNS * 2:]
         messages = build_main_messages(memory_block, conversation_history, user_input)
 
         try:
