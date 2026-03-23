@@ -3,6 +3,7 @@ from __future__ import annotations
 import os
 import re
 from collections import OrderedDict
+from copy import deepcopy
 from datetime import datetime
 from pathlib import Path
 from typing import Any, Callable
@@ -89,6 +90,63 @@ ACTIVE_TO_RESOLVED_CATEGORY = {
     "Relationship State — Active": "Relationship State — Resolved",
     "Technology State — Active": "Technology State — Resolved",
 }
+
+STORY_STATE_SIGNAL_KEYWORDS = (
+    "urgency",
+    "urgent",
+    "countdown",
+    "deadline",
+    "danger",
+    "threat",
+    "risk",
+    "unstable",
+    "instability",
+    "worsening",
+    "deteriorating",
+    "hidden",
+    "secret",
+    "withheld",
+    "pressure",
+    "strain",
+    "conflict",
+    "uncertainty",
+    "hazard",
+    "environmental",
+    "approaching",
+    "mission",
+    "failure",
+    "collapse",
+    "panic",
+    "fear",
+    "tension",
+    "mystery",
+    "exposed",
+    "running out",
+    "time pressure",
+)
+
+STORY_STATE_PRIORITY_CATEGORIES = {
+    "Injury",
+    "Mission State — Active",
+    "Mission State — Resolved",
+    "Psychological State — Active",
+    "Psychological State — Resolved",
+    "Relationship State — Active",
+    "Relationship State — Resolved",
+    "Technology State — Active",
+    "Technology State — Resolved",
+    "Timeline",
+    "Character",
+    "Relationship",
+    "World",
+    "Location",
+    "Object",
+}
+
+STORY_STATE_HEADING = "[StoryState]"
+STORY_STATE_STATUS_PATTERN = re.compile(r"^STATE:\s*(ACTIVE|RESOLVED)\s*$", re.IGNORECASE)
+STORY_STATE_FIRST_SEEN_PATTERN = re.compile(r"^FIRST_SEEN:\s*Chapter\s+(\d+)\s*$", re.IGNORECASE)
+STORY_STATE_RESOLVED_PATTERN = re.compile(r"^RESOLVED_IN:\s*Chapter\s+(\d+)\s*$", re.IGNORECASE)
 
 
 SCENE_SYSTEM_PROMPT = """You are a Canon Memory Extraction Engine for a long-form novel system.
@@ -202,6 +260,16 @@ MEMORY SUGGESTIONS
 1. Fact text → [Category]
 2. Fact text → [Category]
 
+STORY STATE UPDATES
+
+ACTIVATE
+1. Description of unresolved narrative pressure
+2. Description of unresolved narrative pressure
+
+RESOLVE
+1. Short reference label
+2. Short reference label
+
 CHAPTER STRUCTURE NOTE
 
 <one of the required chapter-ending decisions>
@@ -236,6 +304,17 @@ Rules for MEMORY SUGGESTIONS:
 MEMORY SUGGESTIONS
 
 None
+- STORY STATE UPDATES must still be included even if MEMORY SUGGESTIONS is None.
+
+Rules for STORY STATE UPDATES:
+- Track cinematic unresolved pressures that should persist across chapters.
+- Detect urgency, countdowns, approaching danger, worsening conditions, hidden problems, emotional strain, rising conflict, strategic uncertainty, environmental threat, time pressure, secrecy, withheld information, and mission instability.
+- Track both plot-level threats and internal/relationship pressure when they materially affect future narrative movement.
+- Under ACTIVATE, list only unresolved conditions that should become persistent Story States.
+- Under RESOLVE, list short labels for persistent Story States clearly stabilised, closed, or resolved by this scene.
+- If a new pressure is clearly a continuation of an existing state, use wording that closely matches the existing state instead of inventing a separate one.
+- Descriptions must be short, concrete, and cinematic.
+- If no items apply in a subsection, write exactly: None
 
 Rules for CHAPTER STRUCTURE NOTE:
 - Evaluate chapter break strength based on whether the scene creates a strong location shift, tension pivot, emotional resolution, reveal, reversal, decision point, cliffhanger, or meaningful pause in the narrative lifecycle.
@@ -393,13 +472,24 @@ Resolved Threads:
 
 - ...
 
+STORY STATE UPDATES
+
+ACTIVATE
+- ...
+
+RESOLVE
+- ...
+
 Rules:
 
 - Be factual.
 - Do not give writing advice.
 - Do not rewrite scenes.
 - Do not praise the writing.
-- Do not speculate beyond the text."""
+- Do not speculate beyond the text.
+- In STORY STATE UPDATES, capture unresolved narrative escalation, psychological pressure, relationship strain, mission risk, environmental threat, secrecy, and strategic instability that should persist across chapters.
+- Use ACTIVATE for ongoing pressures and RESOLVE for tensions clearly stabilised or concluded.
+- If nothing applies under a subsection, write `- None`."""
 
 
 # ============================================================
@@ -590,21 +680,76 @@ def parse_canon_memory(content: str) -> list[dict[str, Any]]:
     chapters: list[dict[str, Any]] = []
     current_chapter: dict[str, Any] | None = None
     current_category: str | None = None
+    current_story_state: dict[str, Any] | None = None
 
     for raw_line in content.splitlines():
         line = raw_line.rstrip()
         stripped = line.strip()
 
-        if not stripped or stripped == "========================":
+        if stripped == "========================":
             continue
 
         chapter_match = CHAPTER_HEADER_PATTERN.fullmatch(stripped)
         if chapter_match is not None:
+            current_story_state = None
             current_chapter = {
                 "number": int(chapter_match.group(1)),
                 "categories": OrderedDict(),
+                "story_states": [],
             }
             chapters.append(current_chapter)
+            current_category = None
+            continue
+
+        if current_story_state is not None:
+            if not stripped:
+                current_story_state = None
+                continue
+
+            if stripped == STORY_STATE_HEADING:
+                current_chapter["story_states"].append(
+                    {
+                        "description": "",
+                        "state": "ACTIVE",
+                        "first_seen": current_chapter["number"],
+                        "resolved_in": None,
+                    }
+                )
+                current_story_state = current_chapter["story_states"][-1]
+                continue
+
+            state_match = STORY_STATE_STATUS_PATTERN.fullmatch(stripped)
+            if state_match is not None:
+                current_story_state["state"] = state_match.group(1).upper()
+                continue
+
+            first_seen_match = STORY_STATE_FIRST_SEEN_PATTERN.fullmatch(stripped)
+            if first_seen_match is not None:
+                current_story_state["first_seen"] = int(first_seen_match.group(1))
+                continue
+
+            resolved_match = STORY_STATE_RESOLVED_PATTERN.fullmatch(stripped)
+            if resolved_match is not None:
+                current_story_state["resolved_in"] = int(resolved_match.group(1))
+                continue
+
+            description = current_story_state.get("description", "")
+            current_story_state["description"] = (
+                f"{description} {stripped}".strip() if description else stripped
+            )
+            continue
+
+        if not stripped:
+            continue
+
+        if stripped == STORY_STATE_HEADING and current_chapter is not None:
+            current_story_state = {
+                "description": "",
+                "state": "ACTIVE",
+                "first_seen": current_chapter["number"],
+                "resolved_in": None,
+            }
+            current_chapter["story_states"].append(current_story_state)
             current_category = None
             continue
 
@@ -635,6 +780,22 @@ def render_canon_memory(chapters: list[dict[str, Any]]) -> str:
             lines.append(f"[{category}]")
             for fact in facts:
                 lines.append(f"- {render_canon_fact(fact)}")
+        for story_state in chapter.get("story_states", []):
+            description = str(story_state.get("description", "")).strip()
+            if not description:
+                continue
+            lines.extend(
+                [
+                    "",
+                    STORY_STATE_HEADING,
+                    description,
+                    f"STATE: {str(story_state.get('state', 'ACTIVE')).upper()}",
+                    f"FIRST_SEEN: Chapter {int(story_state.get('first_seen', chapter['number']))}",
+                ]
+            )
+            resolved_in = story_state.get("resolved_in")
+            if resolved_in is not None:
+                lines.append(f"RESOLVED_IN: Chapter {int(resolved_in)}")
         blocks.append("\n".join(lines).rstrip())
     return "\n\n".join(blocks).rstrip() + ("\n" if blocks else "")
 
@@ -684,6 +845,187 @@ def facts_are_similar(fact_a: str | dict[str, Any], fact_b: str | dict[str, Any]
     return overlap_ratio >= 0.6
 
 
+def normalize_story_state_description(description: str) -> str:
+    """Normalize a story-state description for matching and deduplication."""
+    return normalize_fact_text(description)
+
+
+def story_states_are_similar(state_a: str | dict[str, Any], state_b: str | dict[str, Any]) -> bool:
+    """Return True when two story-state descriptions represent the same persistent pressure."""
+    text_a = (
+        str(state_a.get("description", "")).strip()
+        if isinstance(state_a, dict)
+        else str(state_a).strip()
+    )
+    text_b = (
+        str(state_b.get("description", "")).strip()
+        if isinstance(state_b, dict)
+        else str(state_b).strip()
+    )
+    return facts_are_similar(text_a, text_b)
+
+
+def should_track_story_state(fact_text: str, category: str) -> bool:
+    """Return True when a canon fact should also become a persistent cinematic Story State."""
+    cleaned_fact = normalize_story_state_description(fact_text)
+    if not cleaned_fact:
+        return False
+
+    if category in {
+        "Mission State — Active",
+        "Mission State — Resolved",
+        "Psychological State — Active",
+        "Psychological State — Resolved",
+        "Relationship State — Active",
+        "Relationship State — Resolved",
+        "Technology State — Active",
+        "Technology State — Resolved",
+        "Injury",
+    }:
+        return True
+
+    if category not in STORY_STATE_PRIORITY_CATEGORIES:
+        return False
+
+    return any(keyword in cleaned_fact for keyword in STORY_STATE_SIGNAL_KEYWORDS)
+
+
+def iter_story_states(chapters: list[dict[str, Any]]) -> list[tuple[dict[str, Any], dict[str, Any]]]:
+    """Return chapter/state pairs for every parsed Story State."""
+    pairs: list[tuple[dict[str, Any], dict[str, Any]]] = []
+    for chapter in chapters:
+        for story_state in chapter.get("story_states", []):
+            pairs.append((chapter, story_state))
+    return pairs
+
+
+def add_or_update_story_state(
+    chapters: list[dict[str, Any]],
+    description: str,
+    first_seen: int,
+    state: str = "ACTIVE",
+    resolved_in: int | None = None,
+) -> bool:
+    """Create or update one persistent Story State without duplicating continuations."""
+    cleaned_description = description.strip()
+    normalized_state = "RESOLVED" if state.strip().upper() == "RESOLVED" else "ACTIVE"
+    if not cleaned_description:
+        return False
+
+    matched_chapter: dict[str, Any] | None = None
+    matched_story_state: dict[str, Any] | None = None
+
+    for chapter, story_state in iter_story_states(chapters):
+        if not story_states_are_similar(story_state, cleaned_description):
+            continue
+        matched_chapter = chapter
+        matched_story_state = story_state
+        break
+
+    if matched_story_state is not None and matched_chapter is not None:
+        existing_description = str(matched_story_state.get("description", "")).strip()
+        if len(cleaned_description) > len(existing_description):
+            matched_story_state["description"] = cleaned_description
+        matched_story_state["first_seen"] = min(
+            int(matched_story_state.get("first_seen", first_seen)),
+            first_seen,
+        )
+        if normalized_state == "RESOLVED":
+            matched_story_state["state"] = "RESOLVED"
+            matched_story_state["resolved_in"] = resolved_in or first_seen
+        else:
+            matched_story_state["state"] = "ACTIVE"
+            matched_story_state["resolved_in"] = None
+        return True
+
+    target_chapter: dict[str, Any] | None = None
+    for chapter in chapters:
+        if chapter["number"] == first_seen:
+            target_chapter = chapter
+            break
+
+    if target_chapter is None:
+        target_chapter = {
+            "number": first_seen,
+            "categories": OrderedDict(),
+            "story_states": [],
+        }
+        chapters.append(target_chapter)
+        chapters.sort(key=lambda chapter: chapter["number"])
+
+    target_chapter.setdefault("story_states", []).append(
+        {
+            "description": cleaned_description,
+            "state": normalized_state,
+            "first_seen": first_seen,
+            "resolved_in": resolved_in if normalized_state == "RESOLVED" else None,
+        }
+    )
+    return True
+
+
+def sync_story_states_from_suggestions(
+    chapters: list[dict[str, Any]],
+    chapter_number: int,
+    suggestions: list[tuple[int, str, str]],
+) -> int:
+    """Derive Story States from canon suggestions and update the canon-memory model."""
+    updates = 0
+    for _, fact, category in suggestions:
+        if not should_track_story_state(fact, category):
+            continue
+
+        state = "ACTIVE"
+        resolved_in: int | None = None
+        if category in ACTIVE_TO_RESOLVED_CATEGORY.values():
+            state = "RESOLVED"
+            resolved_in = chapter_number
+
+        if add_or_update_story_state(
+            chapters,
+            description=fact,
+            first_seen=chapter_number,
+            state=state,
+            resolved_in=resolved_in,
+        ):
+            updates += 1
+
+    return updates
+
+
+def consolidate_story_states(chapters: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Deduplicate Story States across the whole novel while preserving earliest origin."""
+    consolidated_chapters = deepcopy(chapters)
+    original_states: list[dict[str, Any]] = []
+
+    for chapter in consolidated_chapters:
+        original_states.extend(
+            [
+                {
+                    "description": str(state.get("description", "")).strip(),
+                    "state": str(state.get("state", "ACTIVE")).upper(),
+                    "first_seen": int(state.get("first_seen", chapter["number"])),
+                    "resolved_in": state.get("resolved_in"),
+                }
+                for state in chapter.get("story_states", [])
+                if str(state.get("description", "")).strip()
+            ]
+        )
+        chapter["story_states"] = []
+
+    for story_state in sorted(original_states, key=lambda state: state["first_seen"]):
+        add_or_update_story_state(
+            consolidated_chapters,
+            description=story_state["description"],
+            first_seen=story_state["first_seen"],
+            state=story_state["state"],
+            resolved_in=story_state["resolved_in"],
+        )
+
+    consolidated_chapters.sort(key=lambda chapter: chapter["number"])
+    return consolidated_chapters
+
+
 def append_to_canon_memory(
     chapter_number: int,
     selected_facts: list[tuple[str, str]],
@@ -709,7 +1051,11 @@ def append_to_canon_memory(
             break
 
     if target_chapter is None:
-        target_chapter = {"number": chapter_number, "categories": OrderedDict()}
+        target_chapter = {
+            "number": chapter_number,
+            "categories": OrderedDict(),
+            "story_states": [],
+        }
         chapters.append(target_chapter)
 
     saved_count = 0
@@ -725,11 +1071,17 @@ def append_to_canon_memory(
 
     if saved_count > 0:
         target_chapter["categories"] = order_memory_categories(target_chapter["categories"])
-        chapters.sort(key=lambda chapter: chapter["number"])
+    story_state_updates = sync_story_states_from_suggestions(chapters, chapter_number, [
+        (index, fact, category) for index, (fact, category) in enumerate(cleaned_facts, start=1)
+    ])
+    if saved_count > 0 or story_state_updates > 0:
+        chapters = consolidate_story_states(chapters)
         atomic_write(CANON_MEMORY_PATH, render_canon_memory(chapters))
 
     print(f"Saved {saved_count} canon fact(s).")
     print(f"Skipped {skipped_duplicates} duplicate fact(s).")
+    if story_state_updates > 0:
+        print(f"Updated {story_state_updates} story state(s).")
 
 
 
@@ -852,10 +1204,13 @@ def build_chapter_memory_block(
             continue
         category_facts.append({"text": cleaned_fact, "state": "ACTIVE"})
 
-    return {
+    chapter_block = {
         "number": chapter_number,
         "categories": order_memory_categories(categories),
+        "story_states": [],
     }
+    sync_story_states_from_suggestions([chapter_block], chapter_number, suggestions)
+    return chapter_block
 
 
 
@@ -1355,6 +1710,48 @@ def parse_resolution_suggestions(result_text: str) -> list[tuple[int, str]]:
     return suggestions
 
 
+def parse_story_state_updates(result_text: str) -> tuple[list[str], list[str]]:
+    """Parse STORY STATE UPDATES sections into activation and resolution labels."""
+    match = re.search(
+        r"STORY STATE UPDATES\s*(.*?)(?:\n[A-Z][A-Z ]+\n|\Z)",
+        result_text,
+        re.DOTALL,
+    )
+    if match is None:
+        return [], []
+
+    section_text = match.group(1).strip()
+    activate_match = re.search(
+        r"ACTIVATE\s*(.*?)(?:\nRESOLVE\s|\Z)",
+        section_text,
+        re.DOTALL,
+    )
+    resolve_match = re.search(r"RESOLVE\s*(.*)\Z", section_text, re.DOTALL)
+
+    def parse_items(raw_text: str) -> list[str]:
+        cleaned = raw_text.strip()
+        if not cleaned or cleaned.lower() == "none":
+            return []
+
+        items: list[str] = []
+        for line in cleaned.splitlines():
+            stripped = line.strip()
+            if not stripped:
+                continue
+            item_match = re.match(r"^(?:\d+\.|-)\s*(.+?)\s*$", stripped)
+            if item_match is None:
+                continue
+            item_text = item_match.group(1).strip()
+            if item_text.lower() == "none":
+                return []
+            items.append(item_text)
+        return items
+
+    activated = parse_items(activate_match.group(1) if activate_match else "")
+    resolved = parse_items(resolve_match.group(1) if resolve_match else "")
+    return activated, resolved
+
+
 
 def prompt_for_selection(max_number: int, prompt_text: str = "\nSelect numbers to save:") -> list[int] | None:
     """Ask the user which numbered suggestions should be applied."""
@@ -1406,8 +1803,8 @@ def resolution_label_matches_fact(label: str, fact: str) -> bool:
 
 
 
-def apply_resolutions(selected_labels: list[str]) -> int:
-    """Move matching ACTIVE canon facts into their RESOLVED categories."""
+def apply_resolutions(selected_labels: list[str], chapter_number: int | None = None) -> int:
+    """Move matching ACTIVE canon facts and Story States into their resolved lifecycle state."""
     ensure_project_files()
     if not selected_labels or not CANON_MEMORY_PATH.exists():
         return 0
@@ -1422,6 +1819,7 @@ def apply_resolutions(selected_labels: list[str]) -> int:
             continue
 
         matched_entry: tuple[dict[str, Any], str, str] | None = None
+        story_state_resolved = False
 
         for chapter in chapters:
             for category in ACTIVE_TO_RESOLVED_CATEGORY:
@@ -1436,7 +1834,20 @@ def apply_resolutions(selected_labels: list[str]) -> int:
                 break
 
         if matched_entry is None:
-            continue
+            for _, story_state in iter_story_states(chapters):
+                if (
+                    str(story_state.get("state", "ACTIVE")).upper() == "ACTIVE"
+                    and resolution_label_matches_fact(label, str(story_state.get("description", "")))
+                ):
+                    story_state["state"] = "RESOLVED"
+                    story_state["resolved_in"] = chapter_number
+                    resolved_count += 1
+                    story_state_resolved = True
+                    break
+            if matched_entry is None:
+                if story_state_resolved:
+                    continue
+                continue
 
         chapter, active_category, fact = matched_entry
         resolved_category = ACTIVE_TO_RESOLVED_CATEGORY[active_category]
@@ -1455,10 +1866,48 @@ def apply_resolutions(selected_labels: list[str]) -> int:
         resolved_count += 1
 
     if resolved_count > 0:
-        chapters.sort(key=lambda chapter: chapter["number"])
+        chapters = consolidate_story_states(chapters)
         atomic_write(CANON_MEMORY_PATH, render_canon_memory(chapters))
 
     return resolved_count
+
+
+def apply_story_state_updates(
+    chapter_number: int,
+    activated_states: list[str],
+    resolved_labels: list[str],
+) -> tuple[int, int]:
+    """Persist Story State activations and resolutions from an analysis response."""
+    ensure_project_files()
+    chapters = parse_canon_memory(CANON_MEMORY_PATH.read_text(encoding="utf-8"))
+    activations_applied = 0
+
+    for description in activated_states:
+        if add_or_update_story_state(
+            chapters,
+            description=description,
+            first_seen=chapter_number,
+            state="ACTIVE",
+        ):
+            activations_applied += 1
+
+    resolutions_applied = 0
+    for label in resolved_labels:
+        for _, story_state in iter_story_states(chapters):
+            if (
+                str(story_state.get("state", "ACTIVE")).upper() == "ACTIVE"
+                and resolution_label_matches_fact(label, str(story_state.get("description", "")))
+            ):
+                story_state["state"] = "RESOLVED"
+                story_state["resolved_in"] = chapter_number
+                resolutions_applied += 1
+                break
+
+    if activations_applied > 0 or resolutions_applied > 0:
+        chapters = consolidate_story_states(chapters)
+        atomic_write(CANON_MEMORY_PATH, render_canon_memory(chapters))
+
+    return activations_applied, resolutions_applied
 
 
 # ============================================================
@@ -1735,6 +2184,23 @@ def handle_scene_summary(client: Any) -> None:
     print()
     print(result)
 
+    activated_states, resolved_story_states = parse_story_state_updates(result)
+    try:
+        activated_count, resolved_story_count = apply_story_state_updates(
+            chapter_number=chapter_number,
+            activated_states=activated_states,
+            resolved_labels=resolved_story_states,
+        )
+    except OSError as exc:
+        print(f"Could not update story states: {exc}")
+        return
+
+    if activated_count > 0 or resolved_story_count > 0:
+        print(
+            f"\nStory States updated: {activated_count} activated, "
+            f"{resolved_story_count} resolved."
+        )
+
     suggestions = parse_memory_suggestions(result)
     if not suggestions:
         print("\nNo structured canon suggestions found. Nothing saved.")
@@ -1781,7 +2247,7 @@ def handle_scene_summary(client: Any) -> None:
                 if number in selected_resolution_numbers
             ]
             try:
-                resolved_count = apply_resolutions(selected_labels)
+                resolved_count = apply_resolutions(selected_labels, chapter_number=chapter_number)
             except OSError as exc:
                 print(f"Could not update canon memory resolutions: {exc}")
                 return
@@ -1913,6 +2379,7 @@ def handle_rebuild_memory(client: Any) -> None:
             print(f"Extracted {len(suggestions)} fact(s) from chapter {chapter_number}.")
 
         rebuilt_chapters.sort(key=lambda chapter: chapter["number"])
+        rebuilt_chapters = consolidate_story_states(rebuilt_chapters)
 
         try:
             atomic_write(
@@ -1967,6 +2434,7 @@ def handle_rebuild_memory(client: Any) -> None:
         )
         chapters = parse_canon_memory(existing_content)
         chapters = insert_or_replace_chapter_block(chapters, rebuilt_chapter)
+        chapters = consolidate_story_states(chapters)
 
         try:
             atomic_write(CANON_MEMORY_PATH, render_canon_memory(chapters))
@@ -2179,6 +2647,23 @@ def handle_chapter_summary(client: Any) -> None:
     print()
     print(result)
 
+    activated_states, resolved_story_states = parse_story_state_updates(result)
+    try:
+        activated_count, resolved_story_count = apply_story_state_updates(
+            chapter_number=chapter_number,
+            activated_states=activated_states,
+            resolved_labels=resolved_story_states,
+        )
+    except OSError as exc:
+        print(f"Could not update story states: {exc}")
+        return
+
+    if activated_count > 0 or resolved_story_count > 0:
+        print(
+            f"\nStory States updated: {activated_count} activated, "
+            f"{resolved_story_count} resolved."
+        )
+
 
 def handle_build_book(clean: bool = False, publish: bool = False) -> None:
     """Compile all numbered chapter files into a manuscript file."""
@@ -2280,14 +2765,16 @@ def handle_story_state() -> None:
     active_found = False
 
     for chapter in sorted(chapters, key=lambda c: c["number"]):
-        for category, facts in chapter["categories"].items():
-            if category.lower() in ("injury", "tension", "goal", "mystery"):
-                if facts:
-                    active_found = True
-                    print(f"Chapter {chapter['number']} — {category}")
-                    for fact in facts:
-                        print(f"- {fact}")
-                    print()
+        for story_state in chapter.get("story_states", []):
+            if str(story_state.get("state", "ACTIVE")).upper() != "ACTIVE":
+                continue
+            description = str(story_state.get("description", "")).strip()
+            if not description:
+                continue
+            active_found = True
+            print(f"- {description}")
+            print(f"  FIRST_SEEN: Chapter {int(story_state.get('first_seen', chapter['number']))}")
+            print()
 
     if not active_found:
         print("No active narrative states recorded.")
