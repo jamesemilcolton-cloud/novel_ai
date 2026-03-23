@@ -1944,6 +1944,43 @@ def handle_export_chapter() -> None:
     print("Chapter export file was not found.")
 
 
+def handle_timeline_view() -> None:
+    """Display a chapter-ordered overview of timeline facts from canon memory."""
+    canon_memory_exists = CANON_MEMORY_PATH.exists()
+    ensure_project_files()
+
+    if not canon_memory_exists:
+        print("canon_memory.txt not found.")
+        return
+
+    canon_content = CANON_MEMORY_PATH.read_text(encoding="utf-8")
+    chapters = parse_canon_memory(canon_content)
+    ordered_chapters = sorted(chapters, key=lambda chapter: chapter["number"])
+
+    timeline_entries: list[tuple[int, list[str]]] = []
+    for chapter in ordered_chapters:
+        timeline_facts = chapter["categories"].get("Timeline", [])
+        if not timeline_facts:
+            continue
+
+        rendered_facts = [get_fact_text(fact) for fact in timeline_facts if get_fact_text(fact)]
+        if rendered_facts:
+            timeline_entries.append((chapter["number"], rendered_facts))
+
+    if not timeline_entries:
+        print("No timeline events recorded yet.")
+        return
+
+    print("TIMELINE OVERVIEW")
+    print()
+    for index, (chapter_number, facts) in enumerate(timeline_entries):
+        print(f"Chapter {chapter_number}")
+        for fact in facts:
+            print(f"- {fact}")
+        if index < len(timeline_entries) - 1:
+            print()
+
+
 # ============================================================
 # Main application loop
 # ============================================================
@@ -1963,6 +2000,7 @@ def print_help() -> None:
     """Show available commands."""
     print("Available commands:")
     print("  /scene-summary")
+    print("  /timeline-view")
     print("  /rebuild-summaries")
     print("  /rebuild-memory")
     print("  /continuity-check")
@@ -1992,6 +2030,7 @@ def main() -> None:
 
     command_handlers: dict[str, Callable[[], None]] = {
         "/scene-summary": lambda: handle_scene_summary(client),
+        "/timeline-view": handle_timeline_view,
         "/rebuild-summaries": lambda: handle_rebuild_summaries(client),
         "/rebuild-memory": lambda: handle_rebuild_memory(client),
         "/continuity-check": lambda: handle_continuity_check(client),
