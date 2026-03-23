@@ -2238,6 +2238,281 @@ def handle_ideas() -> None:
         print("Idea could not be saved.")
 
 
+TIMELINE_STOPWORDS = {
+    "a", "an", "and", "approaches", "as", "at", "be", "been", "being", "by",
+    "for", "from", "has", "have", "in", "into", "is", "it", "its", "later",
+    "of", "on", "or", "the", "their", "them", "to", "toward", "with",
+    "active", "resolved", "increase", "increases", "increased", "rises", "rose",
+    "rising", "shows", "showing", "signs", "becomes", "becoming", "create",
+    "creates", "created", "indicates", "indicating", "reveals", "revealing",
+    "marks", "marked", "set", "sets", "setting", "stage",
+}
+
+
+ENVIRONMENT_PLOT_KEYWORDS = {
+    "alarm", "anomaly", "breach", "collapse", "countdown", "danger", "debris",
+    "environment", "evacuation", "hazard", "impact", "lockdown", "radiation",
+    "route", "safe", "scan", "sensor", "shelter", "signal", "storm", "survival",
+    "threat", "window",
+}
+
+
+DISCOVERY_KEYWORDS = {
+    "discover", "discovery", "find", "found", "identify", "identified", "learn",
+    "learns", "realise", "realises", "realize", "realizes", "reveal", "reveals",
+    "revealed", "truth", "clue", "evidence", "decode", "decoded", "message",
+    "signal", "secret", "unknown", "uncover", "understand", "insight",
+}
+
+
+CONFLICT_KEYWORDS = {
+    "argument", "attack", "betrayal", "clash", "collision", "conflict", "crisis",
+    "danger", "fear", "fight", "fracture", "hostile", "hostility", "opposes",
+    "alarm", "radiation",
+    "pressure", "risk", "rupture", "strain", "standoff", "struggle", "tension",
+    "threat", "urgent", "urgency", "warning",
+}
+
+
+MISSION_KEYWORDS = {
+    "approach", "arrival", "countdown", "crew", "deadline", "deploy", "deployment",
+    "engine", "escape", "evacuate", "journey", "launch", "mission", "objective",
+    "plan", "preparation", "prepare", "prepared", "progress", "ready", "readiness",
+    "reactor", "repair", "response", "route", "schedule", "shield", "ship",
+    "survival", "system", "window",
+}
+
+
+CHARACTER_KEYWORDS = {
+    "afraid", "doubt", "hesitation", "injury", "pain", "panic", "secret", "shame",
+    "sick", "weakness", "wound",
+}
+
+
+RELATIONSHIP_KEYWORDS = {
+    "alliance", "blame", "bond", "crew", "distrust", "loyalty", "promise", "responsibility",
+    "rift", "team", "trust",
+}
+
+
+def tokenize_timeline_text(text: str) -> set[str]:
+    """Return a compact set of meaningful tokens for timeline thread matching."""
+    return {
+        token
+        for token in re.findall(r"[a-z0-9']+", text.lower())
+        if len(token) > 3 and token not in TIMELINE_STOPWORDS
+    }
+
+
+
+def is_plot_relevant_event(category: str, text: str) -> bool:
+    """Filter out low-impact atmosphere notes from the timeline view."""
+    if category not in {"World", "Location"}:
+        return True
+    tokens = tokenize_timeline_text(text)
+    return (
+        bool(tokens & ENVIRONMENT_PLOT_KEYWORDS)
+        or bool(tokens & DISCOVERY_KEYWORDS)
+        or bool(tokens & CONFLICT_KEYWORDS)
+    )
+
+
+
+def infer_timeline_category(category: str, text: str, state: str) -> str:
+    """Map canon-memory categories into the narrative timeline categories."""
+    tokens = tokenize_timeline_text(text)
+
+    if category in {
+        "Relationship",
+        "Relationship State — Active",
+        "Relationship State — Resolved",
+    }:
+        return "Relationship"
+    if category in {
+        "Character",
+        "Injury",
+        "Psychological State — Active",
+        "Psychological State — Resolved",
+    }:
+        if tokens & RELATIONSHIP_KEYWORDS:
+            return "Relationship"
+        return "Character"
+    if category in {
+        "Mission State — Active",
+        "Mission State — Resolved",
+        "Technology State — Active",
+        "Technology State — Resolved",
+    }:
+        if tokens & CONFLICT_KEYWORDS and state == "ACTIVE":
+            return "Conflict"
+        return "Mission"
+    if category in {"World", "Location"}:
+        if tokens & DISCOVERY_KEYWORDS:
+            return "Discovery"
+        if tokens & CONFLICT_KEYWORDS:
+            return "Conflict"
+        return "Environment"
+    if category == "Object":
+        if tokens & DISCOVERY_KEYWORDS:
+            return "Discovery"
+        if tokens & MISSION_KEYWORDS:
+            return "Mission"
+        return "Environment"
+
+    if tokens & DISCOVERY_KEYWORDS:
+        return "Discovery"
+    if tokens & CONFLICT_KEYWORDS:
+        return "Conflict"
+    if tokens & CHARACTER_KEYWORDS:
+        return "Character"
+    if tokens & RELATIONSHIP_KEYWORDS:
+        return "Relationship"
+    if tokens & MISSION_KEYWORDS or category == "Timeline":
+        return "Mission"
+    return "Environment"
+
+
+
+def build_timeline_event(
+    chapter_number: int,
+    source_category: str,
+    fact: dict[str, Any],
+) -> dict[str, Any] | None:
+    """Convert one canon-memory fact into a narrative timeline event."""
+    text = get_fact_text(fact)
+    state = str(fact.get("state", "ACTIVE")).upper()
+    if not text or not is_plot_relevant_event(source_category, text):
+        return None
+
+    tokens = tokenize_timeline_text(text)
+    return {
+        "chapter": chapter_number,
+        "source_category": source_category,
+        "text": text,
+        "state": "RESOLVED" if state == "RESOLVED" else "ACTIVE",
+        "narrative_category": infer_timeline_category(source_category, text, state),
+        "tokens": tokens,
+    }
+
+
+
+def events_share_thread(event_a: dict[str, Any], event_b: dict[str, Any]) -> bool:
+    """Return True when two timeline events likely describe the same narrative thread."""
+    if facts_are_similar(event_a["text"], event_b["text"]):
+        return True
+
+    shared_tokens = event_a["tokens"] & event_b["tokens"]
+    if len(shared_tokens) >= 2:
+        return True
+
+    if len(shared_tokens) == 1:
+        shared_token = next(iter(shared_tokens))
+        if (
+            shared_token in {"shield", "engine", "mission", "signal", "reactor"}
+            and (
+                event_a["narrative_category"] == event_b["narrative_category"]
+                or "RESOLVED" in {event_a["state"], event_b["state"]}
+            )
+        ):
+            return True
+
+    return False
+
+
+
+def merge_timeline_events(chapters: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Merge duplicate timeline threads into a cleaner chronological event list."""
+    merged_events: list[dict[str, Any]] = []
+    seen_threads: list[dict[str, Any]] = []
+
+    prioritized_categories = [
+        "Timeline",
+        "Mission State — Active",
+        "Mission State — Resolved",
+        "Technology State — Active",
+        "Technology State — Resolved",
+        "Psychological State — Active",
+        "Psychological State — Resolved",
+        "Relationship State — Active",
+        "Relationship State — Resolved",
+        "Character",
+        "Relationship",
+        "Injury",
+        "Foreshadowing Setup",
+        "Foreshadowing Payoff",
+        "Object",
+        "World",
+        "Location",
+    ]
+
+    for chapter in sorted(chapters, key=lambda item: item["number"]):
+        chapter_categories = chapter["categories"]
+        ordered_category_names = [
+            name for name in prioritized_categories if name in chapter_categories
+        ]
+        ordered_category_names.extend(
+            name for name in chapter_categories if name not in ordered_category_names
+        )
+
+        for category_name in ordered_category_names:
+            for fact in chapter_categories.get(category_name, []):
+                event = build_timeline_event(chapter["number"], category_name, fact)
+                if event is None:
+                    continue
+
+                existing_thread = next(
+                    (thread for thread in seen_threads if events_share_thread(thread, event)),
+                    None,
+                )
+
+                if existing_thread is None:
+                    thread_event = dict(event)
+                    seen_threads.append(thread_event)
+                    merged_events.append(event)
+                    continue
+
+                if event["state"] == existing_thread["state"]:
+                    existing_thread["tokens"] = existing_thread["tokens"] | event["tokens"]
+                    if event["narrative_category"] in {"Conflict", "Discovery"}:
+                        existing_thread["narrative_category"] = event["narrative_category"]
+                    if len(event["text"]) > len(existing_thread["text"]):
+                        existing_thread["text"] = event["text"]
+                    continue
+
+                existing_thread["state"] = event["state"]
+                existing_thread["text"] = event["text"]
+                existing_thread["chapter"] = event["chapter"]
+                existing_thread["tokens"] = event["tokens"]
+                existing_thread["narrative_category"] = event["narrative_category"]
+                merged_events.append(event)
+
+    return merged_events
+
+
+
+def render_timeline_overview(chapters: list[dict[str, Any]]) -> str:
+    """Render a readable, chronological story map from canon memory."""
+    timeline_events = merge_timeline_events(chapters)
+    if not timeline_events:
+        return "No timeline events recorded yet."
+
+    lines: list[str] = []
+    current_chapter: int | None = None
+    for event in timeline_events:
+        if event["chapter"] != current_chapter:
+            if lines:
+                lines.append("")
+            current_chapter = event["chapter"]
+            lines.append(f"Chapter {current_chapter}")
+
+        bullet = "✓" if event["state"] == "RESOLVED" else "•"
+        lines.append(
+            f"{bullet} [{event['narrative_category']}] {event['text']} ({event['state']})"
+        )
+
+    return "\n".join(lines)
+
+
 def handle_timeline_view() -> None:
     ensure_project_files()
 
@@ -2248,21 +2523,8 @@ def handle_timeline_view() -> None:
     content = CANON_MEMORY_PATH.read_text(encoding="utf-8")
     chapters = parse_canon_memory(content)
 
-    printed = False
-
     print("\nTIMELINE OVERVIEW\n")
-
-    for chapter in sorted(chapters, key=lambda c: c["number"]):
-        timeline = chapter["categories"].get("Timeline")
-        if timeline:
-            printed = True
-            print(f"Chapter {chapter['number']}")
-            for fact in timeline:
-                print(f"- {fact}")
-            print()
-
-    if not printed:
-        print("No timeline events recorded yet.")
+    print(render_timeline_overview(chapters))
 
 
 def handle_story_state() -> None:
