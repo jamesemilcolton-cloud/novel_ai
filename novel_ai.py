@@ -166,18 +166,31 @@ SCREENPLAY ALIGNMENT NOTE
 Rules for MEMORY SUGGESTIONS:
 - Use a numbered list.
 - Use short, concrete canon facts from the scene only.
+- Only extract facts that matter for long-term continuity.
+- Detect new canon facts introduced in the scene.
+- Detect when a new unresolved narrative pressure, problem, mystery, danger, mission condition, relationship condition, psychological condition, or technology condition begins, and mark it as an Active state.
+- Detect when a previously introduced problem, tension, mystery, danger, mission condition, relationship condition, psychological condition, or technology condition is resolved, and mark it as a Resolved state.
+- Detect emotional or psychological turning points.
+- Detect technology or mission condition changes.
+- Detect setup or payoff of foreshadowing elements.
 - Prioritize active mission problems, psychological changes, relationship shifts, injuries, technology state, location changes, foreshadowing, survival rules, and tracked objects.
 - Deprioritize decorative description, layout, atmosphere, and generic lore.
 - If the chapter is calm, prefer psychological or relational movement.
 - Prefer fewer high-impact facts over many weak ones.
 - Avoid duplicating facts already implied by stronger facts.
-- Every suggestion must use exactly one of these categories: Mission State, Character State, Relationship Shift, Injury, Technology State, Location State, Foreshadowing Setup, World Rule, Object Tracking, World Detail.
-- If there are no strong canon facts, write exactly: None
+- Do NOT invent facts not present in the scene.
+- Every suggestion must use exactly one of these categories: Character, Relationship, World, Location, Object, Timeline, Injury, Mission State — Active, Mission State — Resolved, Psychological State — Active, Psychological State — Resolved, Relationship State — Active, Relationship State — Resolved, Technology State — Active, Technology State — Resolved, Foreshadowing Setup, Foreshadowing Payoff.
+- If there are no strong canon facts, return exactly:
+MEMORY SUGGESTIONS
+
+None
 
 Rules for CHAPTER STRUCTURE NOTE:
-- Decide whether the scene creates a location shift, tension pivot, emotional resolution, or narrative turn.
-- If yes, return exactly: This could be a natural chapter ending.
-- Otherwise return exactly: This scene continues the same narrative tension. Likely NOT a chapter ending point.
+- Evaluate chapter break strength based on whether the scene creates a strong location shift, tension pivot, emotional resolution, reveal, reversal, decision point, cliffhanger, or meaningful pause in the narrative lifecycle.
+- Return exactly one of these lines:
+Strong natural chapter ending point.
+Moderate possible chapter ending.
+Likely NOT a chapter ending.
 
 Rules for SCREENPLAY ALIGNMENT NOTE:
 - If screenplay text is not provided, say exactly: No screenplay source available for comparison.
