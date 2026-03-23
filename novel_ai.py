@@ -79,6 +79,15 @@ ALLOWED_MEMORY_CATEGORIES = (
     "Foreshadowing Payoff",
 )
 
+
+ACTIVE_TO_RESOLVED_CATEGORY = {
+    "Mission State — Active": "Mission State — Resolved",
+    "Psychological State — Active": "Psychological State — Resolved",
+    "Relationship State — Active": "Relationship State — Resolved",
+    "Technology State — Active": "Technology State — Resolved",
+}
+
+
 SCENE_SYSTEM_PROMPT = """You are a Canon Memory Extraction Engine for a long-form novel system.
 
 Your job is to read the provided chapter text and extract story-critical continuity facts,
@@ -198,6 +207,11 @@ SCREENPLAY ALIGNMENT NOTE
 
 <alignment note>
 
+RESOLUTION SUGGESTIONS
+
+1. Short reference label
+2. Short reference label
+
 Rules for MEMORY SUGGESTIONS:
 - Use a numbered list.
 - Use short, concrete canon facts from the scene only.
@@ -231,6 +245,14 @@ Rules for SCREENPLAY ALIGNMENT NOTE:
 - If screenplay text is not provided, say exactly: No screenplay source available for comparison.
 - If screenplay text is provided and the scene diverges, briefly explain the divergence in motivation or events.
 - If screenplay text is provided and aligned, say exactly: Scene remains consistent with screenplay intent.
+
+Rules for RESOLUTION SUGGESTIONS:
+- Look at canon memory facts marked ACTIVE.
+- If the scene clearly resolves or concludes a situation, suggest it.
+- Use a numbered list.
+- Use a short reference label, not the full fact text.
+- If no resolutions apply, write exactly:
+None
 """
 
 CONTINUITY_SYSTEM_PROMPT = """You are a strict continuity editor for a novel project.
@@ -1003,9 +1025,33 @@ def parse_memory_suggestions(result: str) -> list[tuple[int, str, str]]:
 
 
 
-def prompt_for_selection(max_number: int) -> list[int] | None:
-    """Ask the user which extracted facts should be saved."""
-    print("\nSelect numbers to save:")
+def parse_resolution_suggestions(result_text: str) -> list[tuple[int, str]]:
+    """Parse numbered resolution suggestions from the scene summary output."""
+    match = re.search(
+        r"RESOLUTION SUGGESTIONS\s*(.*?)(?:\n[A-Z][A-Z ]+\n|\Z)",
+        result_text,
+        re.DOTALL,
+    )
+    if match is None:
+        return []
+
+    section_text = match.group(1).strip()
+    if not section_text or section_text == "None":
+        return []
+
+    suggestions: list[tuple[int, str]] = []
+    for line in section_text.splitlines():
+        numbered_match = re.match(r"^\s*(\d+)\.\s*(.+?)\s*$", line)
+        if numbered_match is None:
+            continue
+        suggestions.append((int(numbered_match.group(1)), numbered_match.group(2).strip()))
+    return suggestions
+
+
+
+def prompt_for_selection(max_number: int, prompt_text: str = "\nSelect numbers to save:") -> list[int] | None:
+    """Ask the user which numbered suggestions should be applied."""
+    print(prompt_text)
     try:
         raw_selection = input("> ").strip()
     except EOFError:
@@ -1033,6 +1079,79 @@ def prompt_for_selection(max_number: int) -> list[int] | None:
             seen.add(number)
 
     return selections
+
+
+def resolution_label_matches_fact(label: str, fact: str) -> bool:
+    """Return True when a short resolution label clearly points to an ACTIVE fact."""
+    normalized_label = normalize_fact_text(label)
+    normalized_fact = normalize_fact_text(fact)
+    if not normalized_label or not normalized_fact:
+        return False
+
+    if normalized_label in normalized_fact or normalized_fact in normalized_label:
+        return True
+
+    label_words = normalized_label.split()
+    if label_words and all(word in normalized_fact.split() for word in label_words):
+        return True
+
+    return facts_are_similar(label, fact)
+
+
+
+def apply_resolutions(selected_labels: list[str]) -> int:
+    """Move matching ACTIVE canon facts into their RESOLVED categories."""
+    ensure_project_files()
+    if not selected_labels or not CANON_MEMORY_PATH.exists():
+        return 0
+
+    canon_content = CANON_MEMORY_PATH.read_text(encoding="utf-8")
+    chapters = parse_canon_memory(canon_content)
+    resolved_count = 0
+
+    for label in selected_labels:
+        normalized_label = normalize_fact_text(label)
+        if not normalized_label:
+            continue
+
+        matched_entry: tuple[dict[str, Any], str, str] | None = None
+
+        for chapter in chapters:
+            for category in ACTIVE_TO_RESOLVED_CATEGORY:
+                facts = chapter["categories"].get(category, [])
+                for fact in facts:
+                    if resolution_label_matches_fact(label, fact):
+                        matched_entry = (chapter, category, fact)
+                        break
+                if matched_entry is not None:
+                    break
+            if matched_entry is not None:
+                break
+
+        if matched_entry is None:
+            continue
+
+        chapter, active_category, fact = matched_entry
+        resolved_category = ACTIVE_TO_RESOLVED_CATEGORY[active_category]
+        active_facts = chapter["categories"].get(active_category, [])
+        if fact not in active_facts:
+            continue
+
+        active_facts.remove(fact)
+        resolved_facts = chapter["categories"].setdefault(resolved_category, [])
+        if fact not in resolved_facts:
+            resolved_facts.append(fact)
+        if not active_facts:
+            chapter["categories"].pop(active_category, None)
+
+        chapter["categories"] = order_memory_categories(chapter["categories"])
+        resolved_count += 1
+
+    if resolved_count > 0:
+        chapters.sort(key=lambda chapter: chapter["number"])
+        atomic_write(CANON_MEMORY_PATH, render_canon_memory(chapters))
+
+    return resolved_count
 
 
 # ============================================================
@@ -1314,6 +1433,32 @@ def handle_scene_summary(client: Any) -> None:
                     return
             else:
                 print("Nothing saved.")
+
+    resolution_suggestions = parse_resolution_suggestions(result)
+    if resolution_suggestions:
+        print("\nSelect resolutions to apply:")
+        for number, label_text in resolution_suggestions:
+            print(f"{number}. {label_text}")
+
+        resolution_numbers = prompt_for_selection(
+            max(number for number, _ in resolution_suggestions),
+            prompt_text="",
+        )
+        if resolution_numbers is None:
+            print("Resolved 0 canon facts.")
+        else:
+            selected_resolution_numbers = {number for number in resolution_numbers}
+            selected_labels = [
+                label_text
+                for number, label_text in resolution_suggestions
+                if number in selected_resolution_numbers
+            ]
+            try:
+                resolved_count = apply_resolutions(selected_labels)
+            except OSError as exc:
+                print(f"Could not update canon memory resolutions: {exc}")
+                return
+            print(f"Resolved {resolved_count} canon facts.")
 
     try:
         append_scene_summary(chapter_number, result)
