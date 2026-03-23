@@ -1996,6 +1996,34 @@ def handle_timeline_view() -> None:
         print("No timeline events recorded yet.")
 
 
+def handle_story_state() -> None:
+    ensure_project_files()
+
+    if not CANON_MEMORY_PATH.exists():
+        print("No canon memory found.")
+        return
+
+    content = CANON_MEMORY_PATH.read_text(encoding="utf-8")
+    chapters = parse_canon_memory(content)
+
+    print("\nSTORY STATE\n")
+
+    active_found = False
+
+    for chapter in sorted(chapters, key=lambda c: c["number"]):
+        for category, facts in chapter["categories"].items():
+            if category.lower() in ("injury", "tension", "goal", "mystery"):
+                if facts:
+                    active_found = True
+                    print(f"Chapter {chapter['number']} — {category}")
+                    for fact in facts:
+                        print(f"- {fact}")
+                    print()
+
+    if not active_found:
+        print("No active narrative states recorded.")
+
+
 def handle_world_add() -> None:
     """Capture and save one structured world rule entry."""
     print("Enter world rule category:")
@@ -2102,6 +2130,7 @@ def print_help() -> None:
     print("  /ideas")
     print("  /world-add")
     print("  /timeline-view")
+    print("  /story-state")
     print("  /export-chapter")
     print("  /help")
     print("  exit")
@@ -2132,6 +2161,7 @@ def main() -> None:
         "/ideas": handle_ideas,
         "/world-add": handle_world_add,
         "/timeline-view": handle_timeline_view,
+        "/story-state": handle_story_state,
         "/export-chapter": handle_export_chapter,
         "/help": print_help,
     }
