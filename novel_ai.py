@@ -55,12 +55,22 @@ Do not invent persistent facts unless the user states them.
 SCREENPLAY_SOURCE_PATH = NOVEL_PROJECT_DIR / "sources" / "screenplay.pdf"
 ALLOWED_MEMORY_CATEGORIES = (
     "Character",
-    "Timeline",
-    "World",
-    "Object",
     "Relationship",
-    "Injury",
+    "World",
     "Location",
+    "Object",
+    "Timeline",
+    "Injury",
+    "Mission State — Active",
+    "Mission State — Resolved",
+    "Psychological State — Active",
+    "Psychological State — Resolved",
+    "Relationship State — Active",
+    "Relationship State — Resolved",
+    "Technology State — Active",
+    "Technology State — Resolved",
+    "Foreshadowing Setup",
+    "Foreshadowing Payoff",
 )
 
 SCENE_SYSTEM_PROMPT = """You are a Canon Memory Extraction Engine for a long-form novel system.
@@ -81,16 +91,21 @@ You must identify:
 - Important objects with continued relevance
 - Timeline anchors
 - Environmental constraints
+- Unresolved narrative problems and lifecycle states
+- Clear narrative resolutions
+- Foreshadowing setup
+- Foreshadowing payoff
 
 You must NOT extract:
 
 - Mood or atmosphere alone
-- Temporary emotions
+- Temporary emotions that do not create an ongoing psychological state
 - Writing style observations
 - One-off descriptive visuals
 - Speculation or metaphors
 
 You must convert narrative information into concise factual canon statements.
+Keep short factual bullet style.
 
 Return output in this exact structure:
 
@@ -103,17 +118,32 @@ Memory suggestions:
 Allowed categories:
 
 Character
-Timeline
-World
-Object
 Relationship
-Injury
+World
 Location
+Object
+Timeline
+Injury
+Mission State — Active
+Mission State — Resolved
+Psychological State — Active
+Psychological State — Resolved
+Relationship State — Active
+Relationship State — Resolved
+Technology State — Active
+Technology State — Resolved
+Foreshadowing Setup
+Foreshadowing Payoff
 
 Rules:
 
 - You may infer stable facts from descriptive prose.
-- Extract only facts likely to remain true later in the novel.
+- Extract only facts likely to remain true later in the novel or matter for continuity tracking.
+- Detect unresolved problems, active tensions, emotional instability, mission risk, technological failure risk, relationship strain, foreshadowing setup, and clear payoff.
+- Detect resolutions when a previously established problem is clearly solved.
+- Use the correct lifecycle category for active versus resolved states.
+- Mark future threats, mysteries, symbolism, or narrative seeds as Foreshadowing Setup.
+- Mark clear delivery on earlier setup as Foreshadowing Payoff.
 - Do not extract minor temporary scene details.
 - Prefer fewer high-quality canon facts over many weak ones.
 - If no strong canon facts exist, return:
@@ -149,7 +179,11 @@ SCREENPLAY ALIGNMENT NOTE
 Rules for MEMORY SUGGESTIONS:
 - Use a numbered list.
 - Use short, concrete canon facts from the scene only.
-- Every suggestion must use exactly one of these categories: Character, Timeline, World, Object, Relationship, Injury, Location.
+- Suggestions must detect: new unresolved problems, tensions beginning, emotional instability, mission risk, technological failure risk, relationship strain, setup hints for future events, and resolution of previously established problems.
+- If a previously established problem is clearly solved, mark it using the correct "— Resolved" category.
+- If a scene introduces a future threat, mystery, symbolism or narrative seed, mark it as Foreshadowing Setup.
+- If a scene clearly delivers on earlier setup, mark it as Foreshadowing Payoff.
+- Every suggestion must use exactly one of these categories: Character, Relationship, World, Location, Object, Timeline, Injury, Mission State — Active, Mission State — Resolved, Psychological State — Active, Psychological State — Resolved, Relationship State — Active, Relationship State — Resolved, Technology State — Active, Technology State — Resolved, Foreshadowing Setup, Foreshadowing Payoff.
 - If there are no strong canon facts, write exactly: None
 
 Rules for CHAPTER STRUCTURE NOTE:
@@ -176,6 +210,11 @@ Allowed issue types:
 - object continuity errors
 - relationship inconsistencies
 - knowledge inconsistencies
+- unresolved mission states disappearing without resolution
+- resolved states appearing without prior setup
+- foreshadowing payoff appearing without setup
+- long-running active states never progressing
+- emotional or relationship state contradictions
 
 Rules:
 - Do not give writing advice.
@@ -439,7 +478,7 @@ def append_to_canon_memory(
     chapter_number: int,
     selected_facts: list[tuple[str, str]],
 ) -> None:
-    """Append selected canon facts into the appropriate chapter block."""
+    """Append new canon facts without deleting or overwriting existing chapter history."""
     ensure_project_files()
     cleaned_facts = [
         (fact.strip(), category.strip())
@@ -523,14 +562,17 @@ def build_chapter_memory_block(
     chapter_number: int,
     suggestions: list[tuple[int, str, str]],
 ) -> dict[str, Any]:
-    """Convert extracted suggestions into one ordered canon-memory chapter block."""
+    """Convert extracted lifecycle-aware suggestions into one ordered canon-memory chapter block."""
     categories: OrderedDict[str, list[str]] = OrderedDict()
     for _, fact, category in suggestions:
         cleaned_fact = fact.strip()
         cleaned_category = category.strip()
         if not cleaned_fact or not cleaned_category:
             continue
-        categories.setdefault(cleaned_category, []).append(cleaned_fact)
+        category_facts = categories.setdefault(cleaned_category, [])
+        if cleaned_fact in category_facts:
+            continue
+        category_facts.append(cleaned_fact)
 
     return {
         "number": chapter_number,
@@ -543,7 +585,7 @@ def insert_or_replace_chapter_block(
     chapters: list[dict[str, Any]],
     rebuilt_chapter: dict[str, Any],
 ) -> list[dict[str, Any]]:
-    """Replace one chapter block and keep chapter ordering numeric."""
+    """Replace one rebuilt chapter block completely and keep chronological ordering."""
     filtered_chapters = [
         chapter
         for chapter in chapters
