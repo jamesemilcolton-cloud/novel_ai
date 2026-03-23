@@ -34,6 +34,7 @@ SUGGESTION_PATTERN = re.compile(
 )
 CHAPTER_HEADER_PATTERN = re.compile(r"^CHAPTER\s+(\d+)\s*$")
 CATEGORY_HEADER_PATTERN = re.compile(r"^\[(.+)\]\s*$")
+FACT_STATE_PATTERN = re.compile(r"^(.*?)(?:\s*\((ACTIVE|RESOLVED)\))?$")
 ANSI_ESCAPE_PATTERN = re.compile(r"\033\[[0-9;]*[A-Za-z]")
 BRACKETED_PASTE_PATTERN = re.compile(r"(?:\033\[|\^\[\[?)(?:200~|201~|E)|\[\[200~|\[\[201~")
 DISALLOWED_CONTROL_CHAR_PATTERN = re.compile(r"[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]")
@@ -471,6 +472,43 @@ def append_world_rule(category: str, rule_text: str) -> None:
 
 
 
+def parse_canon_fact(fact_line: str) -> dict[str, str]:
+    """Parse one canon fact line into text and lifecycle state."""
+    match = FACT_STATE_PATTERN.fullmatch(fact_line.strip())
+    if match is None:
+        return {"text": fact_line.strip(), "state": "ACTIVE"}
+
+    fact_text = match.group(1).strip()
+    fact_state = (match.group(2) or "ACTIVE").strip().upper()
+    return {
+        "text": fact_text,
+        "state": "RESOLVED" if fact_state == "RESOLVED" else "ACTIVE",
+    }
+
+
+
+def render_canon_fact(fact: str | dict[str, Any]) -> str:
+    """Render one canon fact entry with its lifecycle state marker."""
+    if isinstance(fact, dict):
+        fact_text = str(fact.get("text", "")).strip()
+        fact_state = str(fact.get("state", "ACTIVE")).strip().upper() or "ACTIVE"
+    else:
+        fact_text = str(fact).strip()
+        fact_state = "ACTIVE"
+
+    normalized_state = "RESOLVED" if fact_state == "RESOLVED" else "ACTIVE"
+    return f"{fact_text} ({normalized_state})"
+
+
+
+def get_fact_text(fact: str | dict[str, Any]) -> str:
+    """Return canon fact text without any lifecycle marker."""
+    if isinstance(fact, dict):
+        return str(fact.get("text", "")).strip()
+    return parse_canon_fact(str(fact)).get("text", "").strip()
+
+
+
 def parse_canon_memory(content: str) -> list[dict[str, Any]]:
     """Parse canon memory text into ordered chapter/category blocks."""
     chapters: list[dict[str, Any]] = []
@@ -505,7 +543,7 @@ def parse_canon_memory(content: str) -> list[dict[str, Any]]:
         if stripped.startswith("-") and current_chapter is not None and current_category is not None:
             fact = stripped[1:].strip()
             if fact:
-                current_chapter["categories"][current_category].append(fact)
+                current_chapter["categories"][current_category].append(parse_canon_fact(fact))
 
     return chapters
 
@@ -520,14 +558,14 @@ def render_canon_memory(chapters: list[dict[str, Any]]) -> str:
             lines.append("")
             lines.append(f"[{category}]")
             for fact in facts:
-                lines.append(f"- {fact}")
+                lines.append(f"- {render_canon_fact(fact)}")
         blocks.append("\n".join(lines).rstrip())
     return "\n\n".join(blocks).rstrip() + ("\n" if blocks else "")
 
 
-def order_memory_categories(categories: OrderedDict[str, list[str]]) -> OrderedDict[str, list[str]]:
+def order_memory_categories(categories: OrderedDict[str, list[dict[str, str]]]) -> OrderedDict[str, list[dict[str, str]]]:
     """Return categories in canonical display order, keeping unknown categories last."""
-    ordered_categories: OrderedDict[str, list[str]] = OrderedDict()
+    ordered_categories: OrderedDict[str, list[dict[str, str]]] = OrderedDict()
 
     for category in ALLOWED_MEMORY_CATEGORIES:
         if category in categories and categories[category]:
@@ -541,9 +579,9 @@ def order_memory_categories(categories: OrderedDict[str, list[str]]) -> OrderedD
 
 
 
-def normalize_fact_text(text: str) -> str:
+def normalize_fact_text(text: str | dict[str, Any]) -> str:
     """Normalize canon fact text for duplicate and near-duplicate comparison."""
-    cleaned_text = text.lower().strip()
+    cleaned_text = get_fact_text(text).lower().strip()
     cleaned_text = re.sub(r"\s+", " ", cleaned_text)
     cleaned_text = cleaned_text.strip("\"'")
     cleaned_text = cleaned_text.replace("--", "")
@@ -552,7 +590,7 @@ def normalize_fact_text(text: str) -> str:
     return cleaned_text
 
 
-def facts_are_similar(fact_a: str, fact_b: str) -> bool:
+def facts_are_similar(fact_a: str | dict[str, Any], fact_b: str | dict[str, Any]) -> bool:
     """Return True when two canon facts are duplicates or near-duplicates."""
     normalized_fact_a = normalize_fact_text(fact_a)
     normalized_fact_b = normalize_fact_text(fact_b)
@@ -606,7 +644,7 @@ def append_to_canon_memory(
             skipped_duplicates += 1
             print(f"Skipped duplicate canon fact: {fact}")
             continue
-        category_facts.append(fact)
+        category_facts.append({"text": fact, "state": "ACTIVE"})
         saved_count += 1
 
     if saved_count > 0:
@@ -616,6 +654,43 @@ def append_to_canon_memory(
 
     print(f"Saved {saved_count} canon fact(s).")
     print(f"Skipped {skipped_duplicates} duplicate fact(s).")
+
+
+
+def mark_fact_resolved(chapter_number: int, category: str, fact_text: str) -> bool:
+    """Mark the first matching canon fact in a chapter/category as resolved."""
+    ensure_project_files()
+    if not CANON_MEMORY_PATH.exists():
+        return False
+
+    cleaned_category = category.strip()
+    cleaned_fact_text = fact_text.strip()
+    if not cleaned_category or not cleaned_fact_text:
+        return False
+
+    chapters = parse_canon_memory(CANON_MEMORY_PATH.read_text(encoding="utf-8"))
+    updated = False
+
+    for chapter in chapters:
+        if chapter["number"] != chapter_number:
+            continue
+
+        category_facts = chapter["categories"].get(cleaned_category, [])
+        for existing_fact in category_facts:
+            if not facts_are_similar(existing_fact, cleaned_fact_text):
+                continue
+            if existing_fact.get("state") == "RESOLVED":
+                return False
+            existing_fact["state"] = "RESOLVED"
+            updated = True
+            break
+        break
+
+    if not updated:
+        return False
+
+    atomic_write(CANON_MEMORY_PATH, render_canon_memory(chapters))
+    return True
 
 
 
@@ -690,15 +765,16 @@ def build_chapter_memory_block(
     suggestions: list[tuple[int, str, str]],
 ) -> dict[str, Any]:
     """Convert extracted suggestions into one ordered canon-memory chapter block."""
-    categories: OrderedDict[str, list[str]] = OrderedDict()
+    categories: OrderedDict[str, list[dict[str, str]]] = OrderedDict()
     for _, fact, category in suggestions:
         cleaned_fact = fact.strip()
         cleaned_category = category.strip()
         if not cleaned_fact or not cleaned_category:
             continue
         category_facts = categories.setdefault(cleaned_category, [])
-        if cleaned_fact not in category_facts:
-            category_facts.append(cleaned_fact)
+        if any(facts_are_similar(existing_fact, cleaned_fact) for existing_fact in category_facts):
+            continue
+        category_facts.append({"text": cleaned_fact, "state": "ACTIVE"})
 
     return {
         "number": chapter_number,
