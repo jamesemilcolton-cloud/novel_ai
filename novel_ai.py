@@ -542,16 +542,32 @@ def append_to_canon_memory(
         target_chapter = {"number": chapter_number, "categories": OrderedDict()}
         chapters.append(target_chapter)
 
+    def normalize_fact(text: str) -> str:
+        normalized = re.sub(r"[^\w\s]", " ", text.lower())
+        return " ".join(normalized.split())
+
+    normalized_facts_by_category: dict[str, set[str]] = {
+        category: {normalize_fact(existing_fact) for existing_fact in facts}
+        for category, facts in target_chapter["categories"].items()
+    }
+
     saved_count = 0
+    skipped_duplicates = 0
     for fact, category in cleaned_facts:
         category_facts = target_chapter["categories"].setdefault(category, [])
-        if fact in category_facts:
+        normalized_category_facts = normalized_facts_by_category.setdefault(category, set())
+        normalized_fact = normalize_fact(fact)
+        if normalized_fact in normalized_category_facts:
+            skipped_duplicates += 1
             continue
         category_facts.append(fact)
+        normalized_category_facts.add(normalized_fact)
         saved_count += 1
 
+    if skipped_duplicates:
+        print(f"Skipped {skipped_duplicates} duplicate canon fact(s).")
+
     if saved_count == 0:
-        print("No new canon facts selected to save.")
         return
 
     target_chapter["categories"] = order_memory_categories(target_chapter["categories"])
