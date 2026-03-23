@@ -350,6 +350,55 @@ No writing advice.
 No rewriting."""
 
 
+CHAPTER_SUMMARY_SYSTEM_PROMPT = """You are a narrative summarisation engine for a novel project.
+
+You must analyse ONLY the provided chapter text and canon memory.
+
+Return output in this exact structure:
+
+CHAPTER SUMMARY
+
+Key Events:
+
+- ...
+- ...
+
+Character Movement:
+
+- ...
+- ...
+
+New World Information:
+
+- ...
+
+Tension Movement:
+
+- Rising
+  OR
+- Stable
+  OR
+- Climax
+  OR
+- Resolution
+
+Unresolved Threads Introduced:
+
+- ...
+
+Resolved Threads:
+
+- ...
+
+Rules:
+
+- Be factual.
+- Do not give writing advice.
+- Do not rewrite scenes.
+- Do not praise the writing.
+- Do not speculate beyond the text."""
+
+
 # ============================================================
 # Filesystem helpers
 # ============================================================
@@ -1324,6 +1373,26 @@ def build_idea_resurface_messages(
     ]
 
 
+def build_chapter_summary_messages(
+    chapter_text: str,
+    canon_memory_block: str,
+) -> list[dict[str, str]]:
+    """Build the message list for chapter-level narrative summarisation."""
+    return [
+        {
+            "role": "system",
+            "content": CHAPTER_SUMMARY_SYSTEM_PROMPT,
+        },
+        {
+            "role": "user",
+            "content": (
+                f"Chapter text:\n\n{chapter_text}\n\n"
+                f"Canon memory:\n\n{canon_memory_block}"
+            ),
+        },
+    ]
+
+
 # ============================================================
 # Extraction helpers
 # ============================================================
@@ -1823,6 +1892,38 @@ def handle_idea_resurface(client: Any) -> None:
 
 
 
+def handle_chapter_summary(client: Any) -> None:
+    """Summarise one full chapter using canon memory for narrative context."""
+    ensure_project_files()
+    chapter_number = prompt_for_chapter_number(prompt_text="Enter chapter number:")
+    if chapter_number is None:
+        return
+
+    chapter_path = CHAPTERS_DIR / f"chapter_{chapter_number}.txt"
+    if not chapter_path.exists() or not chapter_path.is_file():
+        print(f"Chapter file not found: {chapter_path}")
+        return
+
+    chapter_text = clean_terminal_text(chapter_path.read_text(encoding="utf-8"))
+    canon_memory_block = read_text_file(CANON_MEMORY_PATH)
+
+    try:
+        result = request_chat_completion(
+            client=client,
+            messages=build_chapter_summary_messages(
+                chapter_text=chapter_text,
+                canon_memory_block=canon_memory_block,
+            ),
+            temperature=SCENE_TEMPERATURE,
+        )
+    except Exception as exc:  # Keep terminal app stable for the user.
+        print(f"Chapter summary failed: {exc}")
+        return
+
+    print()
+    print(result)
+
+
 def handle_build_book(clean: bool = False) -> None:
     """Compile all numbered chapter files into a manuscript file."""
     if not CHAPTERS_DIR.exists():
@@ -1963,6 +2064,7 @@ def print_help() -> None:
     """Show available commands."""
     print("Available commands:")
     print("  /scene-summary")
+    print("  /chapter-summary")
     print("  /rebuild-summaries")
     print("  /rebuild-memory")
     print("  /continuity-check")
@@ -1992,6 +2094,7 @@ def main() -> None:
 
     command_handlers: dict[str, Callable[[], None]] = {
         "/scene-summary": lambda: handle_scene_summary(client),
+        "/chapter-summary": lambda: handle_chapter_summary(client),
         "/rebuild-summaries": lambda: handle_rebuild_summaries(client),
         "/rebuild-memory": lambda: handle_rebuild_memory(client),
         "/continuity-check": lambda: handle_continuity_check(client),
