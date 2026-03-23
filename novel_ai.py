@@ -54,43 +54,50 @@ Do not invent persistent facts unless the user states them.
 
 SCREENPLAY_SOURCE_PATH = NOVEL_PROJECT_DIR / "sources" / "screenplay.pdf"
 ALLOWED_MEMORY_CATEGORIES = (
-    "Character",
-    "Timeline",
-    "World",
-    "Object",
-    "Relationship",
+    "Mission State",
+    "Character State",
+    "Relationship Shift",
     "Injury",
-    "Location",
+    "Technology State",
+    "Location State",
+    "Foreshadowing Setup",
+    "World Rule",
+    "Object Tracking",
+    "World Detail",
 )
 
 SCENE_SYSTEM_PROMPT = """You are a Canon Memory Extraction Engine for a long-form novel system.
 
-Your job is to read the provided chapter text and extract meaningful persistent canon facts,
+Your job is to read the provided chapter text and extract story-critical continuity facts,
 even when they are implied through descriptive narrative.
 
-You must identify:
+Canon memory must preserve survival stakes, active tension, and meaningful character change.
+It must NOT read like encyclopaedic worldbuilding notes.
 
-- Stable world rules
-- Technology mechanics
-- Persistent setting facts
-- Character physical states
-- Injuries or limitations
-- Mission conditions
-- Political / institutional context
-- Relationship dynamics
-- Important objects with continued relevance
-- Timeline anchors
-- Environmental constraints
+Prioritize, in roughly this order:
 
-You must NOT extract:
+1. Active mission problems, danger, or survival pressure
+2. Character psychological state changes
+3. Relationship tension, trust shifts, or alliance changes
+4. Injuries or physical condition changes
+5. Technology status affecting survival, access, or the plot
+6. Location changes
+7. Foreshadowing setups or mystery seeds
+8. Permanent world rules affecting survival
+9. Important tracked objects
 
-- Mood or atmosphere alone
-- Temporary emotions
-- Writing style observations
-- One-off descriptive visuals
-- Speculation or metaphors
+Deprioritize:
 
-You must convert narrative information into concise factual canon statements.
+- Decorative environment description
+- General station or setting layout
+- Atmospheric flavour
+- Generic background lore
+- Technical manual-style explanation unless it is survival-critical
+
+If the chapter is calm, store psychological or relational movement instead.
+Prefer fewer high-impact facts over many low-importance facts.
+Each fact must be short, actionable, and non-duplicative.
+Avoid extracting facts already implied by a stronger fact.
 
 Return output in this exact structure:
 
@@ -102,20 +109,23 @@ Memory suggestions:
 
 Allowed categories:
 
-Character
-Timeline
-World
-Object
-Relationship
+Mission State
+Character State
+Relationship Shift
 Injury
-Location
+Technology State
+Location State
+Foreshadowing Setup
+World Rule
+Object Tracking
+World Detail
 
 Rules:
 
-- You may infer stable facts from descriptive prose.
-- Extract only facts likely to remain true later in the novel.
-- Do not extract minor temporary scene details.
-- Prefer fewer high-quality canon facts over many weak ones.
+- Extract only facts likely to matter to later continuity, tension, danger, survival, or character evolution.
+- Use World Detail only for genuinely important context that does not fit a higher-priority category.
+- Use short, concrete statements, not explanations.
+- Keep only the minimum set of facts needed to preserve continuity.
 - If no strong canon facts exist, return:
 
 Memory suggestions:
@@ -149,7 +159,12 @@ SCREENPLAY ALIGNMENT NOTE
 Rules for MEMORY SUGGESTIONS:
 - Use a numbered list.
 - Use short, concrete canon facts from the scene only.
-- Every suggestion must use exactly one of these categories: Character, Timeline, World, Object, Relationship, Injury, Location.
+- Prioritize active mission problems, psychological changes, relationship shifts, injuries, technology state, location changes, foreshadowing, survival rules, and tracked objects.
+- Deprioritize decorative description, layout, atmosphere, and generic lore.
+- If the chapter is calm, prefer psychological or relational movement.
+- Prefer fewer high-impact facts over many weak ones.
+- Avoid duplicating facts already implied by stronger facts.
+- Every suggestion must use exactly one of these categories: Mission State, Character State, Relationship Shift, Injury, Technology State, Location State, Foreshadowing Setup, World Rule, Object Tracking, World Detail.
 - If there are no strong canon facts, write exactly: None
 
 Rules for CHAPTER STRUCTURE NOTE:
@@ -434,6 +449,21 @@ def render_canon_memory(chapters: list[dict[str, Any]]) -> str:
     return "\n\n".join(blocks).rstrip() + ("\n" if blocks else "")
 
 
+def order_memory_categories(categories: OrderedDict[str, list[str]]) -> OrderedDict[str, list[str]]:
+    """Return categories in canonical display order, keeping unknown categories last."""
+    ordered_categories: OrderedDict[str, list[str]] = OrderedDict()
+
+    for category in ALLOWED_MEMORY_CATEGORIES:
+        if category in categories and categories[category]:
+            ordered_categories[category] = categories[category]
+
+    for category, facts in categories.items():
+        if category not in ordered_categories and facts:
+            ordered_categories[category] = facts
+
+    return ordered_categories
+
+
 
 def append_to_canon_memory(
     chapter_number: int,
@@ -475,6 +505,7 @@ def append_to_canon_memory(
         print("No new canon facts selected to save.")
         return
 
+    target_chapter["categories"] = order_memory_categories(target_chapter["categories"])
     chapters.sort(key=lambda chapter: chapter["number"])
     atomic_write(CANON_MEMORY_PATH, render_canon_memory(chapters))
     print(f"Saved {saved_count} canon fact(s) to {CANON_MEMORY_PATH}.")
@@ -530,11 +561,13 @@ def build_chapter_memory_block(
         cleaned_category = category.strip()
         if not cleaned_fact or not cleaned_category:
             continue
-        categories.setdefault(cleaned_category, []).append(cleaned_fact)
+        category_facts = categories.setdefault(cleaned_category, [])
+        if cleaned_fact not in category_facts:
+            category_facts.append(cleaned_fact)
 
     return {
         "number": chapter_number,
-        "categories": categories,
+        "categories": order_memory_categories(categories),
     }
 
 
