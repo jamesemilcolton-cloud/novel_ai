@@ -541,6 +541,35 @@ def order_memory_categories(categories: OrderedDict[str, list[str]]) -> OrderedD
 
 
 
+def normalize_fact_text(text: str) -> str:
+    """Normalize canon fact text for duplicate and near-duplicate comparison."""
+    cleaned_text = text.lower().strip()
+    cleaned_text = re.sub(r"\s+", " ", cleaned_text)
+    cleaned_text = cleaned_text.strip("\"'")
+    cleaned_text = cleaned_text.replace("--", "")
+    cleaned_text = re.sub(r"\s+", " ", cleaned_text)
+    cleaned_text = cleaned_text.rstrip(".,;: ")
+    return cleaned_text
+
+
+def facts_are_similar(fact_a: str, fact_b: str) -> bool:
+    """Return True when two canon facts are duplicates or near-duplicates."""
+    normalized_fact_a = normalize_fact_text(fact_a)
+    normalized_fact_b = normalize_fact_text(fact_b)
+
+    if normalized_fact_a == normalized_fact_b:
+        return True
+
+    words_a = normalized_fact_a.split()
+    words_b = normalized_fact_b.split()
+    if not words_a or not words_b:
+        return False
+
+    common_words = len(set(words_a) & set(words_b))
+    overlap_ratio = common_words / max(len(words_a), len(words_b))
+    return overlap_ratio >= 0.6
+
+
 def append_to_canon_memory(
     chapter_number: int,
     selected_facts: list[tuple[str, str]],
@@ -569,38 +598,24 @@ def append_to_canon_memory(
         target_chapter = {"number": chapter_number, "categories": OrderedDict()}
         chapters.append(target_chapter)
 
-    def normalize_fact(text: str) -> str:
-        normalized = re.sub(r"[^\w\s]", " ", text.lower())
-        return " ".join(normalized.split())
-
-    normalized_facts_by_category: dict[str, set[str]] = {
-        category: {normalize_fact(existing_fact) for existing_fact in facts}
-        for category, facts in target_chapter["categories"].items()
-    }
-
     saved_count = 0
     skipped_duplicates = 0
     for fact, category in cleaned_facts:
         category_facts = target_chapter["categories"].setdefault(category, [])
-        normalized_category_facts = normalized_facts_by_category.setdefault(category, set())
-        normalized_fact = normalize_fact(fact)
-        if normalized_fact in normalized_category_facts:
+        if any(facts_are_similar(existing_fact, fact) for existing_fact in category_facts):
             skipped_duplicates += 1
+            print(f"Skipped duplicate canon fact: {fact}")
             continue
         category_facts.append(fact)
-        normalized_category_facts.add(normalized_fact)
         saved_count += 1
 
-    if skipped_duplicates:
-        print(f"Skipped {skipped_duplicates} duplicate canon fact(s).")
+    if saved_count > 0:
+        target_chapter["categories"] = order_memory_categories(target_chapter["categories"])
+        chapters.sort(key=lambda chapter: chapter["number"])
+        atomic_write(CANON_MEMORY_PATH, render_canon_memory(chapters))
 
-    if saved_count == 0:
-        return
-
-    target_chapter["categories"] = order_memory_categories(target_chapter["categories"])
-    chapters.sort(key=lambda chapter: chapter["number"])
-    atomic_write(CANON_MEMORY_PATH, render_canon_memory(chapters))
-    print(f"Saved {saved_count} canon fact(s) to {CANON_MEMORY_PATH}.")
+    print(f"Saved {saved_count} canon fact(s).")
+    print(f"Skipped {skipped_duplicates} duplicate fact(s).")
 
 
 
