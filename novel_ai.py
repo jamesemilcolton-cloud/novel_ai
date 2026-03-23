@@ -21,8 +21,6 @@ PROJECT_ANALYSIS_DIR = NOVEL_PROJECT_DIR / "analysis"
 CHAPTERS_DIR = NOVEL_PROJECT_DIR / "chapters"
 MANUSCRIPT_DIR = NOVEL_PROJECT_DIR / "manuscript"
 MANUSCRIPT_PATH = MANUSCRIPT_DIR / "novel.txt"
-CLEAN_MANUSCRIPT_PATH = MANUSCRIPT_DIR / "novel_clean.txt"
-PUBLISH_MANUSCRIPT_PATH = MANUSCRIPT_DIR / "novel_publish.txt"
 CONTINUITY_REPORTS_DIR = PROJECT_ANALYSIS_DIR / "continuity_reports"
 REBUILD_LOG_DIR = PROJECT_ANALYSIS_DIR / "rebuild_logs"
 CANON_MEMORY_PATH = PROJECT_MEMORY_DIR / "canon_memory.txt"
@@ -40,8 +38,6 @@ FACT_STATE_PATTERN = re.compile(r"^(.*?)(?:\s*\((ACTIVE|RESOLVED)\))?$")
 ANSI_ESCAPE_PATTERN = re.compile(r"\033\[[0-9;]*[A-Za-z]")
 BRACKETED_PASTE_PATTERN = re.compile(r"(?:\033\[|\^\[\[?)(?:200~|201~|E)|\[\[200~|\[\[201~")
 DISALLOWED_CONTROL_CHAR_PATTERN = re.compile(r"[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]")
-SCENE_BREAK_PATTERN = re.compile(r"^\s*(?:[-=*_~#])(?:\s*(?:[-=*_~#])){2,}\s*$")
-METADATA_LINE_PATTERN = re.compile(r"^\s*(title|project title|author|author name)\s*:\s*(.+?)\s*$", re.IGNORECASE)
 
 MODEL_NAME = os.getenv("OPENAI_MODEL", "gpt-4.1-mini")
 MAIN_TEMPERATURE = 0.8
@@ -1307,301 +1303,6 @@ def build_manuscript_text(chapter_paths: list[Path]) -> str:
     return "\n\n".join(sections) + ("\n\n" if sections else "")
 
 
-def clean_manuscript_text(text: str) -> str:
-    """Normalize chapter text for clean manuscript output."""
-    cleaned_text = ANSI_ESCAPE_PATTERN.sub("", text)
-    cleaned_text = BRACKETED_PASTE_PATTERN.sub("", cleaned_text)
-    cleaned_text = DISALLOWED_CONTROL_CHAR_PATTERN.sub("", cleaned_text)
-
-    cleaned_lines: list[str] = []
-    previous_blank = False
-
-    for raw_line in cleaned_text.splitlines():
-        stripped_line = raw_line.rstrip()
-
-        if re.fullmatch(r"[-=*]{3,}", stripped_line.strip()):
-            continue
-
-        if not stripped_line.strip():
-            if previous_blank:
-                continue
-            cleaned_lines.append("")
-            previous_blank = True
-            continue
-
-        cleaned_lines.append(stripped_line)
-        previous_blank = False
-
-    return "\n".join(cleaned_lines).strip()
-
-
-def build_clean_manuscript_text(chapter_paths: list[Path]) -> str:
-    """Compile chapter files into a cleaned manuscript string."""
-    sections: list[str] = []
-
-    for path in chapter_paths:
-        chapter_number = extract_chapter_number(path)
-        if chapter_number is None:
-            continue
-
-        chapter_text = clean_manuscript_text(path.read_text(encoding="utf-8"))
-        sections.append(f"CHAPTER {chapter_number}\n\n{chapter_text}".rstrip())
-
-    return "\n\n\n".join(sections) + ("\n" if sections else "")
-
-
-def number_to_words(number: int) -> str:
-    """Convert a positive integer into uppercase English words."""
-    if number <= 0:
-        return str(number)
-
-    ones = {
-        0: "zero",
-        1: "one",
-        2: "two",
-        3: "three",
-        4: "four",
-        5: "five",
-        6: "six",
-        7: "seven",
-        8: "eight",
-        9: "nine",
-        10: "ten",
-        11: "eleven",
-        12: "twelve",
-        13: "thirteen",
-        14: "fourteen",
-        15: "fifteen",
-        16: "sixteen",
-        17: "seventeen",
-        18: "eighteen",
-        19: "nineteen",
-    }
-    tens = {
-        20: "twenty",
-        30: "thirty",
-        40: "forty",
-        50: "fifty",
-        60: "sixty",
-        70: "seventy",
-        80: "eighty",
-        90: "ninety",
-    }
-    scales = (
-        (1_000_000_000, "billion"),
-        (1_000_000, "million"),
-        (1_000, "thousand"),
-    )
-
-    def under_thousand(value: int) -> str:
-        parts: list[str] = []
-        hundreds = value // 100
-        remainder = value % 100
-
-        if hundreds:
-            parts.append(f"{ones[hundreds]} hundred")
-        if remainder:
-            if remainder < 20:
-                parts.append(ones[remainder])
-            else:
-                tens_value = remainder // 10 * 10
-                ones_value = remainder % 10
-                if ones_value:
-                    parts.append(f"{tens[tens_value]}-{ones[ones_value]}")
-                else:
-                    parts.append(tens[tens_value])
-        return " ".join(parts)
-
-    remaining = number
-    parts: list[str] = []
-
-    for scale_value, scale_name in scales:
-        if remaining >= scale_value:
-            chunk = remaining // scale_value
-            parts.append(f"{under_thousand(chunk)} {scale_name}")
-            remaining %= scale_value
-
-    if remaining:
-        parts.append(under_thousand(remaining))
-
-    return " ".join(parts).upper()
-
-
-def extract_project_metadata() -> tuple[str, str]:
-    """Return project title and author name when available."""
-    metadata_candidates = [
-        NOVEL_PROJECT_DIR / "project_metadata.txt",
-        NOVEL_PROJECT_DIR / "metadata.txt",
-        NOVEL_PROJECT_DIR / "project_title.txt",
-        NOVEL_PROJECT_DIR / "title.txt",
-        NOVEL_PROJECT_DIR / "author.txt",
-        PROJECT_MEMORY_DIR / "project_metadata.txt",
-        PROJECT_MEMORY_DIR / "metadata.txt",
-    ]
-    title = ""
-    author = ""
-
-    for path in metadata_candidates:
-        if not path.exists() or not path.is_file():
-            continue
-
-        content = path.read_text(encoding="utf-8").strip()
-        if not content:
-            continue
-
-        if path.stem in {"project_title", "title"} and not title:
-            title = content.splitlines()[0].strip()
-        elif path.stem == "author" and not author:
-            author = content.splitlines()[0].strip()
-
-        for line in content.splitlines():
-            match = METADATA_LINE_PATTERN.match(line)
-            if match is None:
-                continue
-            key = match.group(1).strip().lower()
-            value = match.group(2).strip()
-            if not value:
-                continue
-            if key in {"title", "project title"} and not title:
-                title = value
-            elif key in {"author", "author name"} and not author:
-                author = value
-
-        if title and author:
-            break
-
-    return title.strip(), author.strip()
-
-
-def clean_publishing_text(text: str) -> str:
-    """Deep-clean manuscript text and normalize spacing for publishing output."""
-    cleaned_text = ANSI_ESCAPE_PATTERN.sub("", text)
-    cleaned_text = BRACKETED_PASTE_PATTERN.sub("", cleaned_text)
-    cleaned_text = DISALLOWED_CONTROL_CHAR_PATTERN.sub("", cleaned_text)
-    cleaned_text = cleaned_text.replace("\r\n", "\n").replace("\r", "\n")
-    normalized_lines: list[str] = []
-    previous_blank = False
-    previous_scene_break = False
-
-    for raw_line in cleaned_text.splitlines():
-        stripped_line = raw_line.strip()
-
-        if SCENE_BREAK_PATTERN.fullmatch(stripped_line):
-            if normalized_lines and normalized_lines[-1] != "":
-                normalized_lines.append("")
-            if not previous_scene_break:
-                normalized_lines.append("***")
-            normalized_lines.append("")
-            previous_blank = True
-            previous_scene_break = True
-            continue
-
-        if not stripped_line:
-            if previous_blank:
-                continue
-            normalized_lines.append("")
-            previous_blank = True
-            previous_scene_break = False
-            continue
-
-        normalized_lines.append(stripped_line)
-        previous_blank = False
-        previous_scene_break = False
-
-    cleaned_lines: list[str] = []
-    index = 0
-    while index < len(normalized_lines):
-        line = normalized_lines[index]
-        if line == "***":
-            if cleaned_lines and cleaned_lines[-1] != "":
-                cleaned_lines.append("")
-            cleaned_lines.append("***")
-            if index + 1 < len(normalized_lines) and normalized_lines[index + 1] != "":
-                cleaned_lines.append("")
-            index += 1
-            continue
-
-        if line == "":
-            if cleaned_lines and cleaned_lines[-1] == "":
-                index += 1
-                continue
-            cleaned_lines.append("")
-            index += 1
-            continue
-
-        paragraph_lines = [line]
-        index += 1
-        while index < len(normalized_lines) and normalized_lines[index] not in {"", "***"}:
-            paragraph_lines.append(normalized_lines[index])
-            index += 1
-
-        paragraph_text = " ".join(part.strip() for part in paragraph_lines if part.strip())
-        if paragraph_text:
-            cleaned_lines.append(paragraph_text)
-
-    return "\n".join(cleaned_lines).strip()
-
-
-def split_subtitle_and_body(chapter_text: str) -> tuple[str, str]:
-    """Extract an optional subtitle from the first short standalone line."""
-    if not chapter_text:
-        return "", ""
-
-    paragraphs = [paragraph.strip() for paragraph in chapter_text.split("\n\n") if paragraph.strip()]
-    if not paragraphs:
-        return "", ""
-
-    first_paragraph = paragraphs[0]
-    candidate_line = first_paragraph.replace("\n", " ").strip()
-    has_body = len(paragraphs) > 1
-
-    if (
-        has_body
-        and 1 <= len(candidate_line) <= 80
-        and not candidate_line.endswith((".", "!", "?", ":", ";"))
-        and not candidate_line.startswith(("\"", "'", "“", "‘"))
-        and candidate_line != "***"
-        and candidate_line.upper() != candidate_line
-        and candidate_line.lower() != candidate_line
-    ):
-        body = "\n\n".join(paragraphs[1:]).strip()
-        return candidate_line, body
-
-    return "", chapter_text
-
-
-def build_publish_manuscript_text(chapter_paths: list[Path]) -> str:
-    """Compile a publishing-ready manuscript with title page and formatted chapters."""
-    project_title, author_name = extract_project_metadata()
-    title_page_lines = [
-        project_title or "Untitled Novel",
-        "",
-        "A Novel",
-        "",
-        "by",
-        author_name,
-    ]
-    sections = ["\n".join(title_page_lines).rstrip()]
-
-    for path in chapter_paths:
-        chapter_number = extract_chapter_number(path)
-        if chapter_number is None:
-            continue
-
-        chapter_text = clean_publishing_text(path.read_text(encoding="utf-8"))
-        subtitle, body_text = split_subtitle_and_body(chapter_text)
-        chapter_lines = [f"CHAPTER {number_to_words(chapter_number)}", ""]
-
-        if subtitle:
-            chapter_lines.extend([subtitle, ""])
-
-        if body_text:
-            chapter_lines.append(body_text)
-
-        sections.append("\n".join(chapter_lines).rstrip())
-
-    return "\n\n\n".join(section for section in sections if section).rstrip() + "\n"
-
 
 # ============================================================
 # Input helpers
@@ -2665,45 +2366,27 @@ def handle_chapter_summary(client: Any) -> None:
         )
 
 
-def handle_build_book(clean: bool = False, publish: bool = False) -> None:
+def handle_build_book() -> None:
     """Compile all numbered chapter files into a manuscript file."""
     if not CHAPTERS_DIR.exists():
-        print("No chapters found." if clean or publish else "No chapter files found.")
+        print("No chapter files found.")
         return
 
     chapter_paths = load_sorted_chapter_paths()
     if not chapter_paths:
-        print("No chapters found." if clean or publish else "No chapter files found.")
+        print("No chapter files found.")
         return
 
-    if publish:
-        manuscript_text = build_publish_manuscript_text(chapter_paths)
-        output_path = PUBLISH_MANUSCRIPT_PATH
-    else:
-        manuscript_text = (
-            build_clean_manuscript_text(chapter_paths)
-            if clean
-            else build_manuscript_text(chapter_paths)
-        )
-        output_path = CLEAN_MANUSCRIPT_PATH if clean else MANUSCRIPT_PATH
+    manuscript_text = build_manuscript_text(chapter_paths)
 
     try:
         MANUSCRIPT_DIR.mkdir(parents=True, exist_ok=True)
-        if publish and output_path.exists():
-            print(f"Manuscript build failed: {output_path} already exists.")
-            return
-        if publish:
-            output_path.write_text(manuscript_text, encoding="utf-8")
-        else:
-            atomic_write(output_path, manuscript_text)
+        atomic_write(MANUSCRIPT_PATH, manuscript_text)
     except OSError as exc:
         print(f"Manuscript build failed: {exc}")
         return
 
-    if publish:
-        print("Publishing manuscript built successfully.")
-    else:
-        print("Clean manuscript built successfully." if clean else "Manuscript built successfully.")
+    print("Manuscript built successfully.")
 
 
 
@@ -3144,8 +2827,6 @@ def print_help() -> None:
     print("  /proofread")
     print("  /idea-resurface")
     print("  /build-book")
-    print("  /build-book --clean")
-    print("  /build-book --publish")
     print("  /ideas")
     print("  /world-add")
     print("  /timeline-view")
@@ -3205,13 +2886,6 @@ def main() -> None:
             print("Goodbye.")
             break
 
-        if user_input == "/build-book --clean":
-            handle_build_book(clean=True)
-            continue
-
-        if user_input == "/build-book --publish":
-            handle_build_book(publish=True)
-            continue
 
         if user_input in command_handlers:
             command_handlers[user_input]()
