@@ -23,6 +23,7 @@ MANUSCRIPT_DIR = NOVEL_PROJECT_DIR / "manuscript"
 MANUSCRIPT_PATH = MANUSCRIPT_DIR / "novel.txt"
 CONTINUITY_REPORTS_DIR = PROJECT_ANALYSIS_DIR / "continuity_reports"
 REBUILD_LOG_DIR = PROJECT_ANALYSIS_DIR / "rebuild_logs"
+DRAFTS_DIR = NOVEL_PROJECT_DIR / "drafts"
 CANON_MEMORY_PATH = PROJECT_MEMORY_DIR / "canon_memory.txt"
 SCENE_SUMMARIES_PATH = PROJECT_MEMORY_DIR / "scene_summaries.txt"
 IDEAS_PATH = PROJECT_MEMORY_DIR / "ideas.txt"
@@ -2390,6 +2391,156 @@ def handle_build_book() -> None:
 
 
 
+def handle_save_draft() -> None:
+    """Snapshot all chapters into a timestamped draft manuscript."""
+    if not CHAPTERS_DIR.exists():
+        print("No chapter files found.")
+        return
+
+    chapter_paths = load_sorted_chapter_paths()
+    if not chapter_paths:
+        print("No chapter files found.")
+        return
+
+    draft_text = build_manuscript_text(chapter_paths)
+    timestamp = datetime.utcnow().strftime("%Y%m%d_%H%M")
+    draft_path = DRAFTS_DIR / f"draft_{timestamp}.txt"
+
+    try:
+        DRAFTS_DIR.mkdir(parents=True, exist_ok=True)
+        if draft_path.exists():
+            print("Draft snapshot already exists for this minute. Try again in a moment.")
+            return
+        atomic_write(draft_path, draft_text)
+    except OSError as exc:
+        print(f"Draft snapshot failed: {exc}")
+        return
+
+    print("Draft snapshot saved.")
+
+
+def load_sorted_draft_paths() -> list[Path]:
+    """Return saved draft files sorted by filename."""
+    if not DRAFTS_DIR.exists():
+        return []
+
+    draft_paths: list[Path] = []
+    for path in DRAFTS_DIR.iterdir():
+        if path.is_file() and path.name.startswith("draft_") and path.suffix == ".txt":
+            draft_paths.append(path)
+    return sorted(draft_paths, key=lambda path: path.name)
+
+
+def handle_list_drafts() -> list[Path]:
+    """Print a numbered list of draft files and return them."""
+    draft_paths = load_sorted_draft_paths()
+    if not draft_paths:
+        print("No drafts found.")
+        return []
+
+    for index, path in enumerate(draft_paths, start=1):
+        print(f"{index}. {path.name}")
+    return draft_paths
+
+
+def split_manuscript_into_chapters(text: str) -> list[tuple[int, str]]:
+    """Split manuscript text into numbered chapter bodies using CHAPTER headers."""
+    lines = text.splitlines()
+    chapters: list[tuple[int, str]] = []
+    current_number: int | None = None
+    current_lines: list[str] = []
+
+    def commit_current() -> None:
+        nonlocal current_number, current_lines
+        if current_number is None:
+            return
+        chapter_text = "\n".join(current_lines).strip()
+        chapters.append((current_number, chapter_text))
+        current_number = None
+        current_lines = []
+
+    line_index = 0
+    while line_index < len(lines):
+        stripped = lines[line_index].strip()
+
+        if stripped == "========================" and line_index + 1 < len(lines):
+            chapter_match = CHAPTER_HEADER_PATTERN.fullmatch(lines[line_index + 1].strip())
+            if chapter_match is not None:
+                commit_current()
+                current_number = int(chapter_match.group(1))
+                line_index += 2
+                if (
+                    line_index < len(lines)
+                    and lines[line_index].strip() == "========================"
+                ):
+                    line_index += 1
+                if line_index < len(lines) and not lines[line_index].strip():
+                    line_index += 1
+                continue
+
+        chapter_match = CHAPTER_HEADER_PATTERN.fullmatch(stripped)
+        if chapter_match is not None:
+            commit_current()
+            current_number = int(chapter_match.group(1))
+            line_index += 1
+            if line_index < len(lines) and not lines[line_index].strip():
+                line_index += 1
+            continue
+
+        if current_number is not None:
+            current_lines.append(lines[line_index])
+        line_index += 1
+
+    commit_current()
+    return chapters
+
+
+def handle_restore_draft() -> None:
+    """Restore chapter files from a selected draft snapshot."""
+    draft_paths = handle_list_drafts()
+    if not draft_paths:
+        return
+
+    print("Choose draft number:")
+    try:
+        choice = input("> ").strip()
+    except EOFError:
+        print()
+        return
+
+    if not choice.isdigit():
+        print("Invalid draft selection.")
+        return
+
+    selected_index = int(choice) - 1
+    if selected_index < 0 or selected_index >= len(draft_paths):
+        print("Invalid draft selection.")
+        return
+
+    selected_draft = draft_paths[selected_index]
+    try:
+        draft_text = selected_draft.read_text(encoding="utf-8")
+    except OSError as exc:
+        print(f"Could not read draft: {exc}")
+        return
+
+    chapter_entries = split_manuscript_into_chapters(draft_text)
+    if not chapter_entries:
+        print("Draft could not be restored: no chapter markers found.")
+        return
+
+    try:
+        CHAPTERS_DIR.mkdir(parents=True, exist_ok=True)
+        for chapter_number, chapter_text in chapter_entries:
+            chapter_path = CHAPTERS_DIR / f"chapter_{chapter_number}.txt"
+            atomic_write(chapter_path, chapter_text + ("\n" if chapter_text else ""))
+    except OSError as exc:
+        print(f"Draft restore failed: {exc}")
+        return
+
+    print("Draft restored successfully.")
+
+
 def handle_ideas() -> None:
     """Capture a freeform writing idea without affecting assistant state."""
     print("Paste idea. Type END on a new line when finished.")
@@ -2933,6 +3084,9 @@ def print_help() -> None:
     print("  /proofread")
     print("  /idea-resurface")
     print("  /build-book")
+    print("  /save-draft")
+    print("  /drafts")
+    print("  /restore-draft")
     print("  /ideas")
     print("  /world-add")
     print("  /timeline-view")
@@ -2965,6 +3119,9 @@ def main() -> None:
         "/proofread": lambda: handle_proofread(client),
         "/idea-resurface": lambda: handle_idea_resurface(client),
         "/build-book": handle_build_book,
+        "/save-draft": handle_save_draft,
+        "/drafts": handle_list_drafts,
+        "/restore-draft": handle_restore_draft,
         "/ideas": handle_ideas,
         "/world-add": handle_world_add,
         "/timeline-view": handle_timeline_view,
