@@ -22,6 +22,7 @@ CHAPTERS_DIR = NOVEL_PROJECT_DIR / "chapters"
 MANUSCRIPT_DIR = NOVEL_PROJECT_DIR / "manuscript"
 MANUSCRIPT_PATH = MANUSCRIPT_DIR / "novel.txt"
 CONTINUITY_REPORTS_DIR = PROJECT_ANALYSIS_DIR / "continuity_reports"
+BOOK_INTEGRITY_REPORTS_DIR = PROJECT_ANALYSIS_DIR / "book_integrity_reports"
 REBUILD_LOG_DIR = PROJECT_ANALYSIS_DIR / "rebuild_logs"
 DRAFTS_DIR = NOVEL_PROJECT_DIR / "drafts"
 CANON_MEMORY_PATH = PROJECT_MEMORY_DIR / "canon_memory.txt"
@@ -364,6 +365,62 @@ CONTINUITY REPORT
 - Issue 2
 """
 
+BOOK_INTEGRITY_SYSTEM_PROMPT = """You are a professional novel structural editor.
+
+Analyse the FULL novel draft.
+
+Return a BOOK INTEGRITY REPORT.
+
+You must evaluate:
+
+STRUCTURE
+
+- pacing imbalance
+- weak openings
+- rushed climaxes
+- chapter length inconsistency
+
+CONTINUITY
+
+- injury continuity errors
+- location contradictions
+- timeline breaks
+- knowledge inconsistencies
+
+CHARACTER ARCS
+
+- unresolved motivations
+- inconsistent emotional progression
+- sudden unexplained behavioural shifts
+
+PLOT THREAD STATUS
+
+- unresolved setups
+- dropped conflicts
+- premature resolutions
+
+TENSION FLOW
+
+- flat narrative zones
+- spikes without build-up
+- missing escalation
+
+WORLD CONSISTENCY
+
+- broken rules
+- technology drift
+- setting contradictions
+
+Do NOT rewrite text.
+Do NOT give story ideas.
+Do NOT praise writing.
+
+Return format:
+
+BOOK INTEGRITY REPORT
+
+<sections listed above>"""
+
 PROOFREAD_SYSTEM_PROMPT = """You are a professional proofreader.
 
 You must:
@@ -502,6 +559,7 @@ def ensure_project_files() -> None:
     MANUSCRIPT_DIR.mkdir(parents=True, exist_ok=True)
     (NOVEL_PROJECT_DIR / "sources").mkdir(parents=True, exist_ok=True)
     CONTINUITY_REPORTS_DIR.mkdir(parents=True, exist_ok=True)
+    BOOK_INTEGRITY_REPORTS_DIR.mkdir(parents=True, exist_ok=True)
     REBUILD_LOG_DIR.mkdir(parents=True, exist_ok=True)
     CANON_MEMORY_PATH.touch(exist_ok=True)
     SCENE_SUMMARIES_PATH.touch(exist_ok=True)
@@ -1742,6 +1800,28 @@ def build_continuity_messages(
     ]
 
 
+def build_book_integrity_messages(
+    full_novel_block: str,
+    canon_memory_block: str,
+    world_rules_block: str,
+) -> list[dict[str, str]]:
+    """Build the isolated message list for full-book integrity analysis."""
+    return [
+        {
+            "role": "system",
+            "content": BOOK_INTEGRITY_SYSTEM_PROMPT,
+        },
+        {
+            "role": "user",
+            "content": (
+                f"Full novel draft:\n\n{full_novel_block}\n\n"
+                f"Canon memory:\n\n{canon_memory_block}\n\n"
+                f"World rules:\n\n{world_rules_block}"
+            ),
+        },
+    ]
+
+
 def build_proofread_messages(text_to_proofread: str) -> list[dict[str, str]]:
     """Build the isolated message list for proofreading."""
     return [
@@ -2032,6 +2112,57 @@ def handle_continuity_check(client: Any) -> None:
     print()
     print(f"Continuity report saved to {report_path}.")
 
+
+
+def handle_book_integrity(client: Any) -> None:
+    """Run a full-novel structural and continuity integrity audit."""
+    ensure_project_files()
+
+    if not CHAPTERS_DIR.exists():
+        print(f"Missing chapters directory: {CHAPTERS_DIR}")
+        return
+
+    chapter_paths = load_sorted_chapter_paths()
+    if not chapter_paths:
+        print("No chapter files found in ~/writing/novel_project/chapters/")
+        return
+
+    full_novel_block = build_manuscript_text(chapter_paths).strip()
+    canon_memory_block = load_memory_block(full=True)
+    world_rules_block = (
+        read_text_file(WORLD_RULES_PATH)
+        if WORLD_RULES_PATH.exists()
+        else "(not provided)"
+    )
+
+    messages = build_book_integrity_messages(
+        full_novel_block=full_novel_block,
+        canon_memory_block=canon_memory_block,
+        world_rules_block=world_rules_block,
+    )
+
+    try:
+        report = request_chat_completion(
+            client=client,
+            messages=messages,
+            temperature=CONTINUITY_TEMPERATURE,
+        )
+    except Exception as exc:  # Keep terminal app stable for the user.
+        print(f"Book integrity analysis failed: {exc}")
+        return
+
+    timestamp = datetime.utcnow().strftime("%Y%m%d_%H%M")
+    report_path = BOOK_INTEGRITY_REPORTS_DIR / f"book_integrity_{timestamp}.txt"
+    try:
+        atomic_write(report_path, report + "\n")
+    except OSError as exc:
+        print(f"Book integrity report could not be saved: {exc}")
+        return
+
+    print()
+    print(report)
+    print()
+    print(f"Book integrity report saved to {report_path}.")
 
 
 def handle_rebuild_memory(client: Any) -> None:
@@ -3081,6 +3212,7 @@ def print_help() -> None:
     print("  /rebuild-summaries")
     print("  /rebuild-memory")
     print("  /continuity-check")
+    print("  /book-integrity")
     print("  /proofread")
     print("  /idea-resurface")
     print("  /build-book")
@@ -3116,6 +3248,7 @@ def main() -> None:
         "/rebuild-summaries": lambda: handle_rebuild_summaries(client),
         "/rebuild-memory": lambda: handle_rebuild_memory(client),
         "/continuity-check": lambda: handle_continuity_check(client),
+        "/book-integrity": lambda: handle_book_integrity(client),
         "/proofread": lambda: handle_proofread(client),
         "/idea-resurface": lambda: handle_idea_resurface(client),
         "/build-book": handle_build_book,
