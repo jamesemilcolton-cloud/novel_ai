@@ -47,6 +47,7 @@ SCENE_TEMPERATURE = 0.1
 CONTINUITY_TEMPERATURE = 0.0
 PROOFREAD_TEMPERATURE = 0.1
 IDEA_RESURFACE_TEMPERATURE = 0.3
+DRAFT_PASS_TEMPERATURE = 0.2
 
 CONTINUITY_CHAPTER_WINDOW = 3
 MAX_SCENE_SUMMARIES = 5
@@ -544,6 +545,34 @@ Rules:
 - In STORY STATE UPDATES, capture unresolved narrative escalation, psychological pressure, relationship strain, mission risk, environmental threat, secrecy, and strategic instability that should persist across chapters.
 - Use ACTIVATE for ongoing pressures and RESOLVE for tensions clearly stabilised or concluded.
 - If nothing applies under a subsection, write `- None`."""
+
+
+DRAFT_PASS_SYSTEM_PROMPT_TEMPLATE = """You are a professional novel developmental editor.
+
+You must analyse the provided text.
+
+You must NOT rewrite any part of the story.
+You must NOT give grammar corrections.
+You must NOT give publishing advice.
+You must NOT invent new plot ideas.
+
+You must ONLY evaluate the requested dimension:
+
+{dimension_instructions}
+
+Return output in this format:
+
+<{dimension_name} PASS>
+
+Strengths:
+- bullet points
+
+Weaknesses:
+- bullet points
+
+Suggested Improvements:
+- bullet points
+"""
 
 
 # ============================================================
@@ -1880,6 +1909,28 @@ def build_chapter_summary_messages(
     ]
 
 
+def build_draft_pass_messages(
+    text_to_analyse: str,
+    dimension_name: str,
+    dimension_instructions: str,
+) -> list[dict[str, str]]:
+    """Build the isolated message list for draft analysis passes."""
+    system_prompt = DRAFT_PASS_SYSTEM_PROMPT_TEMPLATE.format(
+        dimension_name=dimension_name,
+        dimension_instructions=dimension_instructions,
+    )
+    return [
+        {
+            "role": "system",
+            "content": system_prompt,
+        },
+        {
+            "role": "user",
+            "content": text_to_analyse,
+        },
+    ]
+
+
 # ============================================================
 # Extraction helpers
 # ============================================================
@@ -2496,6 +2547,148 @@ def handle_chapter_summary(client: Any) -> None:
             f"\nStory States updated: {activated_count} activated, "
             f"{resolved_story_count} resolved."
         )
+
+
+def handle_draft_pass(client: Any) -> None:
+    """Run a structured editorial analysis pass without modifying project files."""
+    print("Select analysis mode:")
+    print()
+    print("1 — Structure")
+    print("2 — Tension")
+    print("3 — Character")
+    print("4 — Clarity")
+
+    try:
+        mode_selection = input("> ").strip()
+    except EOFError:
+        print()
+        return
+
+    dimension_map = {
+        "1": (
+            "STRUCTURE",
+            "STRUCTURE:\n"
+            "- pacing\n"
+            "- scene purpose\n"
+            "- narrative momentum\n"
+            "- chapter openings\n"
+            "- chapter endings\n"
+            "- exposition balance",
+        ),
+        "2": (
+            "TENSION",
+            "TENSION:\n"
+            "- stakes clarity\n"
+            "- urgency\n"
+            "- mystery drive\n"
+            "- threat escalation\n"
+            "- emotional pressure",
+        ),
+        "3": (
+            "CHARACTER",
+            "CHARACTER:\n"
+            "- motivation clarity\n"
+            "- emotional realism\n"
+            "- dialogue authenticity\n"
+            "- relationship dynamics\n"
+            "- behavioural consistency",
+        ),
+        "4": (
+            "CLARITY",
+            "CLARITY:\n"
+            "- readability\n"
+            "- sentence density\n"
+            "- description overload\n"
+            "- technical confusion\n"
+            "- flow interruptions",
+        ),
+    }
+
+    selected_dimension = dimension_map.get(mode_selection)
+    if selected_dimension is None:
+        print("Invalid selection. Enter 1, 2, 3, or 4.")
+        return
+
+    dimension_name, dimension_instructions = selected_dimension
+
+    print()
+    print("Run on:")
+    print()
+    print("1 — Single chapter")
+    print("2 — Full novel")
+
+    try:
+        scope_selection = input("> ").strip()
+    except EOFError:
+        print()
+        return
+
+    text_to_analyse = ""
+    if scope_selection == "1":
+        print("Enter chapter number:")
+        try:
+            chapter_value = input("> ").strip()
+        except EOFError:
+            print()
+            return
+
+        if not chapter_value or not chapter_value.isdigit() or int(chapter_value) <= 0:
+            print("Chapter number must be a positive integer.")
+            return
+
+        chapter_number = int(chapter_value)
+        chapter_path = CHAPTERS_DIR / f"chapter_{chapter_number}.txt"
+        if not chapter_path.exists() or not chapter_path.is_file():
+            print(f"Chapter file not found: {chapter_path}")
+            return
+
+        text_to_analyse = clean_terminal_text(chapter_path.read_text(encoding="utf-8"))
+    elif scope_selection == "2":
+        if not CHAPTERS_DIR.exists() or not CHAPTERS_DIR.is_dir():
+            print(f"Missing chapters directory: {CHAPTERS_DIR}")
+            return
+
+        chapter_paths = load_sorted_chapter_paths()
+        if not chapter_paths:
+            print("No chapter files found.")
+            return
+
+        chapter_blocks = []
+        for chapter_path in chapter_paths:
+            chapter_number = extract_chapter_number(chapter_path)
+            if chapter_number is None:
+                continue
+            chapter_text = clean_terminal_text(chapter_path.read_text(encoding="utf-8"))
+            chapter_blocks.append(f"CHAPTER {chapter_number}\n\n{chapter_text}")
+
+        text_to_analyse = "\n\n".join(chapter_blocks).strip()
+        if not text_to_analyse:
+            print("No chapter text found.")
+            return
+    else:
+        print("Invalid selection. Enter 1 or 2.")
+        return
+
+    if not text_to_analyse:
+        print("No text found to analyse.")
+        return
+
+    try:
+        result = request_chat_completion(
+            client=client,
+            messages=build_draft_pass_messages(
+                text_to_analyse=text_to_analyse,
+                dimension_name=dimension_name,
+                dimension_instructions=dimension_instructions,
+            ),
+            temperature=DRAFT_PASS_TEMPERATURE,
+        )
+    except Exception as exc:  # Keep terminal app stable for the user.
+        print(f"Draft pass failed: {exc}")
+        return
+
+    print()
+    print(result)
 
 
 def handle_build_book() -> None:
@@ -3215,6 +3408,7 @@ def print_help() -> None:
     print("  /book-integrity")
     print("  /proofread")
     print("  /idea-resurface")
+    print("  /draft-pass")
     print("  /build-book")
     print("  /save-draft")
     print("  /drafts")
@@ -3251,6 +3445,7 @@ def main() -> None:
         "/book-integrity": lambda: handle_book_integrity(client),
         "/proofread": lambda: handle_proofread(client),
         "/idea-resurface": lambda: handle_idea_resurface(client),
+        "/draft-pass": lambda: handle_draft_pass(client),
         "/build-book": handle_build_book,
         "/save-draft": handle_save_draft,
         "/drafts": handle_list_drafts,
