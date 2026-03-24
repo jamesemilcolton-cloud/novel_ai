@@ -23,6 +23,7 @@ MANUSCRIPT_DIR = NOVEL_PROJECT_DIR / "manuscript"
 MANUSCRIPT_PATH = MANUSCRIPT_DIR / "novel.txt"
 CLEAN_MANUSCRIPT_PATH = MANUSCRIPT_DIR / "novel_clean.txt"
 PUBLISH_MANUSCRIPT_PATH = MANUSCRIPT_DIR / "novel_publish.txt"
+DOCX_MANUSCRIPT_PATH = MANUSCRIPT_DIR / "novel.docx"
 CONTINUITY_REPORTS_DIR = PROJECT_ANALYSIS_DIR / "continuity_reports"
 REBUILD_LOG_DIR = PROJECT_ANALYSIS_DIR / "rebuild_logs"
 CANON_MEMORY_PATH = PROJECT_MEMORY_DIR / "canon_memory.txt"
@@ -42,6 +43,10 @@ BRACKETED_PASTE_PATTERN = re.compile(r"(?:\033\[|\^\[\[?)(?:200~|201~|E)|\[\[200
 DISALLOWED_CONTROL_CHAR_PATTERN = re.compile(r"[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]")
 SCENE_BREAK_PATTERN = re.compile(r"^\s*(?:[-=*_~#])(?:\s*(?:[-=*_~#])){2,}\s*$")
 METADATA_LINE_PATTERN = re.compile(r"^\s*(title|project title|author|author name)\s*:\s*(.+?)\s*$", re.IGNORECASE)
+CANON_TITLE_PATTERN = re.compile(
+    r"^\s*(?:title|project title|novel title)\s*:\s*(.+?)\s*$",
+    re.IGNORECASE,
+)
 
 MODEL_NAME = os.getenv("OPENAI_MODEL", "gpt-4.1-mini")
 MAIN_TEMPERATURE = 0.8
@@ -1471,6 +1476,176 @@ def extract_project_metadata() -> tuple[str, str]:
             break
 
     return title.strip(), author.strip()
+
+
+def detect_title_from_canon_memory() -> str:
+    """Extract project title from canon memory metadata when present."""
+    if not CANON_MEMORY_PATH.exists() or not CANON_MEMORY_PATH.is_file():
+        return ""
+
+    content = CANON_MEMORY_PATH.read_text(encoding="utf-8")
+    for line in content.splitlines():
+        match = CANON_TITLE_PATTERN.match(line)
+        if match is None:
+            continue
+        title = match.group(1).strip()
+        if title:
+            return title
+
+    return ""
+
+
+def clean_docx_chapter_lines(text: str) -> list[str]:
+    """Clean chapter text while preserving paragraph rhythm and line breaks."""
+    cleaned_text = ANSI_ESCAPE_PATTERN.sub("", text)
+    cleaned_text = BRACKETED_PASTE_PATTERN.sub("", cleaned_text)
+    cleaned_text = DISALLOWED_CONTROL_CHAR_PATTERN.sub("", cleaned_text)
+    cleaned_text = cleaned_text.replace("\r\n", "\n").replace("\r", "\n")
+
+    cleaned_lines: list[str] = []
+    blank_streak = 0
+
+    for raw_line in cleaned_text.split("\n"):
+        stripped_right = raw_line.rstrip()
+        stripped_line = stripped_right.strip()
+
+        if SCENE_BREAK_PATTERN.fullmatch(stripped_line):
+            if cleaned_lines and cleaned_lines[-1] != "":
+                cleaned_lines.append("")
+            cleaned_lines.append("<<SCENE_BREAK>>")
+            cleaned_lines.append("")
+            blank_streak = 1
+            continue
+
+        if stripped_line == "":
+            blank_streak += 1
+            if blank_streak > 1:
+                continue
+            cleaned_lines.append("")
+            continue
+
+        blank_streak = 0
+        cleaned_lines.append(stripped_right)
+
+    while cleaned_lines and cleaned_lines[0] == "":
+        cleaned_lines.pop(0)
+    while cleaned_lines and cleaned_lines[-1] == "":
+        cleaned_lines.pop()
+
+    return cleaned_lines
+
+
+def resolve_docx_output_path() -> Path:
+    """Return a safe DOCX output path without overwriting existing files."""
+    if not DOCX_MANUSCRIPT_PATH.exists():
+        return DOCX_MANUSCRIPT_PATH
+
+    timestamp = datetime.now().strftime("%Y%m%d_%H%M")
+    return MANUSCRIPT_DIR / f"novel_{timestamp}.docx"
+
+
+def handle_export_book_docx() -> None:
+    """Export a formatted DOCX manuscript for professional sharing."""
+    ensure_project_files()
+    if not CHAPTERS_DIR.exists():
+        print("No chapters found.")
+        return
+
+    chapter_paths = load_sorted_chapter_paths()
+    if not chapter_paths:
+        print("No chapters found.")
+        return
+
+    try:
+        from docx import Document
+        from docx.enum.section import WD_ALIGN_VERTICAL, WD_SECTION_START
+        from docx.enum.text import WD_ALIGN_PARAGRAPH, WD_BREAK, WD_LINE_SPACING
+        from docx.shared import Inches, Pt
+    except ImportError:
+        print("python-docx not installed. Run: pip install python-docx")
+        return
+
+    project_title, author_name = extract_project_metadata()
+    canon_title = detect_title_from_canon_memory()
+    final_title = canon_title or project_title or "Untitled Novel"
+
+    manuscript = Document()
+    first_section = manuscript.sections[0]
+    first_section.top_margin = Inches(1)
+    first_section.bottom_margin = Inches(1)
+    first_section.left_margin = Inches(1)
+    first_section.right_margin = Inches(1)
+    first_section.vertical_alignment = WD_ALIGN_VERTICAL.CENTER
+
+    normal_style = manuscript.styles["Normal"]
+    normal_style.font.name = "Times New Roman"
+    normal_style.font.size = Pt(12)
+    normal_paragraph_format = normal_style.paragraph_format
+    normal_paragraph_format.line_spacing_rule = WD_LINE_SPACING.DOUBLE
+    normal_paragraph_format.space_before = Pt(0)
+    normal_paragraph_format.space_after = Pt(0)
+    normal_paragraph_format.first_line_indent = Inches(0.5)
+
+    title_paragraph = manuscript.add_paragraph(final_title)
+    title_paragraph.alignment = WD_ALIGN_PARAGRAPH.CENTER
+    manuscript.add_paragraph("")
+    subtitle_paragraph = manuscript.add_paragraph("A Novel")
+    subtitle_paragraph.alignment = WD_ALIGN_PARAGRAPH.CENTER
+    manuscript.add_paragraph("")
+    by_paragraph = manuscript.add_paragraph("by")
+    by_paragraph.alignment = WD_ALIGN_PARAGRAPH.CENTER
+    author_paragraph = manuscript.add_paragraph(author_name)
+    author_paragraph.alignment = WD_ALIGN_PARAGRAPH.CENTER
+
+    manuscript.add_section(WD_SECTION_START.NEW_PAGE)
+    body_section = manuscript.sections[-1]
+    body_section.top_margin = Inches(1)
+    body_section.bottom_margin = Inches(1)
+    body_section.left_margin = Inches(1)
+    body_section.right_margin = Inches(1)
+    body_section.vertical_alignment = WD_ALIGN_VERTICAL.TOP
+
+    for index, path in enumerate(chapter_paths):
+        chapter_number = extract_chapter_number(path)
+        if chapter_number is None:
+            continue
+
+        if index > 0:
+            page_break_paragraph = manuscript.add_paragraph()
+            page_break_paragraph.add_run().add_break(WD_BREAK.PAGE)
+
+        heading_paragraph = manuscript.add_paragraph(f"CHAPTER {number_to_words(chapter_number)}")
+        heading_paragraph.alignment = WD_ALIGN_PARAGRAPH.CENTER
+        heading_format = heading_paragraph.paragraph_format
+        heading_format.space_after = Pt(24)
+        heading_format.first_line_indent = Inches(0)
+        for run in heading_paragraph.runs:
+            run.font.name = "Times New Roman"
+            run.font.size = Pt(16)
+
+        chapter_lines = clean_docx_chapter_lines(path.read_text(encoding="utf-8"))
+        for line in chapter_lines:
+            if line == "<<SCENE_BREAK>>":
+                manuscript.add_paragraph("")
+                scene_break = manuscript.add_paragraph("---")
+                scene_break.alignment = WD_ALIGN_PARAGRAPH.CENTER
+                scene_break.paragraph_format.first_line_indent = Inches(0)
+                manuscript.add_paragraph("")
+                continue
+
+            paragraph = manuscript.add_paragraph(line)
+            if not line.strip():
+                paragraph.paragraph_format.first_line_indent = Inches(0)
+
+    output_path = resolve_docx_output_path()
+    try:
+        MANUSCRIPT_DIR.mkdir(parents=True, exist_ok=True)
+        manuscript.save(output_path)
+    except OSError as exc:
+        print(f"DOCX export failed: {exc}")
+        return
+
+    print("DOCX manuscript export complete.")
 
 
 def clean_publishing_text(text: str) -> str:
@@ -3146,6 +3321,7 @@ def print_help() -> None:
     print("  /build-book")
     print("  /build-book --clean")
     print("  /build-book --publish")
+    print("  /export-book --docx")
     print("  /ideas")
     print("  /world-add")
     print("  /timeline-view")
@@ -3211,6 +3387,10 @@ def main() -> None:
 
         if user_input == "/build-book --publish":
             handle_build_book(publish=True)
+            continue
+
+        if user_input == "/export-book --docx":
+            handle_export_book_docx()
             continue
 
         if user_input in command_handlers:
