@@ -2801,6 +2801,112 @@ def handle_export_chapter() -> None:
     print("Chapter export file was not found.")
 
 
+def handle_export_book_docx() -> None:
+    """Export all numbered chapter files to a DOCX manuscript."""
+    ensure_project_files()
+
+    try:
+        from docx import Document
+        from docx.enum.text import WD_ALIGN_PARAGRAPH, WD_LINE_SPACING
+        from docx.shared import Inches, Pt
+    except ImportError:
+        print("python-docx not installed. Run: pip install python-docx")
+        return
+
+    chapter_paths = load_sorted_chapter_paths()
+    if not chapter_paths:
+        print("No chapter files found in ~/writing/novel_project/chapters/")
+        return
+
+    title = "Untitled Novel"
+    if CANON_MEMORY_PATH.exists() and CANON_MEMORY_PATH.is_file():
+        canon_lines = CANON_MEMORY_PATH.read_text(encoding="utf-8").splitlines()
+        if canon_lines:
+            raw_first_line = clean_terminal_text(canon_lines[0])
+            if raw_first_line:
+                if raw_first_line.lower().startswith("title:"):
+                    parsed_title = raw_first_line.partition(":")[2].strip()
+                    if parsed_title:
+                        title = parsed_title
+                else:
+                    title = raw_first_line
+
+    document = Document()
+
+    normal_style = document.styles["Normal"]
+    normal_font = normal_style.font
+    normal_font.name = "Times New Roman"
+    normal_font.size = Pt(12)
+    normal_style.paragraph_format.line_spacing_rule = WD_LINE_SPACING.DOUBLE
+    normal_style.paragraph_format.first_line_indent = Inches(0.5)
+
+    for section in document.sections:
+        section.top_margin = Inches(1)
+        section.bottom_margin = Inches(1)
+        section.left_margin = Inches(1)
+        section.right_margin = Inches(1)
+
+    title_paragraph = document.add_paragraph()
+    title_paragraph.alignment = WD_ALIGN_PARAGRAPH.CENTER
+    title_paragraph.add_run(title)
+
+    subtitle_paragraph = document.add_paragraph()
+    subtitle_paragraph.alignment = WD_ALIGN_PARAGRAPH.CENTER
+    subtitle_paragraph.add_run("A Novel")
+
+    by_paragraph = document.add_paragraph()
+    by_paragraph.alignment = WD_ALIGN_PARAGRAPH.CENTER
+    by_paragraph.add_run("by")
+
+    blank_author_paragraph = document.add_paragraph()
+    blank_author_paragraph.alignment = WD_ALIGN_PARAGRAPH.CENTER
+    blank_author_paragraph.add_run("")
+
+    document.add_page_break()
+
+    scene_break_pattern = re.compile(r"^(?:-{3,}|\*{3,}|(?:\*\s*){3,}|(?:—\s*){3,})$")
+
+    for path in chapter_paths:
+        chapter_number = extract_chapter_number(path)
+        if chapter_number is None:
+            continue
+
+        chapter_text = clean_terminal_text(path.read_text(encoding="utf-8"))
+
+        document.add_page_break()
+        heading = document.add_paragraph()
+        heading.alignment = WD_ALIGN_PARAGRAPH.CENTER
+        heading.paragraph_format.first_line_indent = Inches(0)
+        heading_run = heading.add_run(f"CHAPTER {chapter_number}")
+        heading_run.font.name = "Times New Roman"
+        heading_run.font.size = Pt(16)
+        heading_run.bold = True
+
+        for raw_line in chapter_text.splitlines():
+            line = raw_line.strip()
+            if not line:
+                document.add_paragraph("")
+                continue
+
+            if scene_break_pattern.fullmatch(line):
+                scene_break = document.add_paragraph()
+                scene_break.alignment = WD_ALIGN_PARAGRAPH.CENTER
+                scene_break.paragraph_format.first_line_indent = Inches(0)
+                scene_break.add_run("---")
+                continue
+
+            body_paragraph = document.add_paragraph(line)
+            body_paragraph.alignment = WD_ALIGN_PARAGRAPH.LEFT
+
+    output_path = MANUSCRIPT_DIR / "novel.docx"
+    if output_path.exists():
+        timestamp = datetime.utcnow().strftime("%Y%m%d_%H%M%S")
+        output_path = MANUSCRIPT_DIR / f"novel_{timestamp}.docx"
+
+    document.save(str(output_path))
+    print("DOCX manuscript export complete.")
+
+
 # ============================================================
 # Main application loop
 # ============================================================
@@ -2832,6 +2938,7 @@ def print_help() -> None:
     print("  /timeline-view")
     print("  /story-state")
     print("  /export-chapter")
+    print("  /export-book --docx")
     print("  /help")
     print("  exit")
 
@@ -2863,6 +2970,7 @@ def main() -> None:
         "/timeline-view": handle_timeline_view,
         "/story-state": handle_story_state,
         "/export-chapter": handle_export_chapter,
+        "/export-book --docx": handle_export_book_docx,
         "/help": print_help,
     }
 
