@@ -25,6 +25,7 @@ CONTINUITY_REPORTS_DIR = PROJECT_ANALYSIS_DIR / "continuity_reports"
 BOOK_INTEGRITY_REPORTS_DIR = PROJECT_ANALYSIS_DIR / "book_integrity_reports"
 REBUILD_LOG_DIR = PROJECT_ANALYSIS_DIR / "rebuild_logs"
 DRAFTS_DIR = NOVEL_PROJECT_DIR / "drafts"
+BACKUPS_DIR = NOVEL_PROJECT_DIR / "backups"
 CANON_MEMORY_PATH = PROJECT_MEMORY_DIR / "canon_memory.txt"
 SCENE_SUMMARIES_PATH = PROJECT_MEMORY_DIR / "scene_summaries.txt"
 IDEAS_PATH = PROJECT_MEMORY_DIR / "ideas.txt"
@@ -1391,6 +1392,88 @@ def build_manuscript_text(chapter_paths: list[Path]) -> str:
     return "\n\n".join(sections) + ("\n\n" if sections else "")
 
 
+def chunk_text_blocks(blocks: list[str], max_chars: int = 12000) -> list[str]:
+    """Group text blocks into bounded chunks for safer long-form analysis calls."""
+    chunks: list[str] = []
+    current_parts: list[str] = []
+    current_length = 0
+
+    for raw_block in blocks:
+        block = raw_block.strip()
+        if not block:
+            continue
+
+        block_length = len(block)
+        separator_length = 2 if current_parts else 0
+
+        if current_parts and current_length + separator_length + block_length > max_chars:
+            chunks.append("\n\n".join(current_parts))
+            current_parts = [block]
+            current_length = block_length
+            continue
+
+        if block_length > max_chars:
+            if current_parts:
+                chunks.append("\n\n".join(current_parts))
+                current_parts = []
+                current_length = 0
+            start = 0
+            while start < block_length:
+                end = min(start + max_chars, block_length)
+                chunks.append(block[start:end])
+                start = end
+            continue
+
+        current_parts.append(block)
+        current_length += separator_length + block_length
+
+    if current_parts:
+        chunks.append("\n\n".join(current_parts))
+
+    return chunks
+
+
+def warn_for_missing_chapter_files(chapter_paths: list[Path]) -> None:
+    """Print warnings for gaps in numbered chapter files without stopping execution."""
+    chapter_numbers = [
+        extract_chapter_number(path)
+        for path in chapter_paths
+    ]
+    ordered_numbers = sorted(number for number in chapter_numbers if number is not None)
+    if not ordered_numbers:
+        return
+
+    expected = set(range(ordered_numbers[0], ordered_numbers[-1] + 1))
+    missing_numbers = sorted(expected - set(ordered_numbers))
+    for missing_number in missing_numbers:
+        print(f"Warning: Missing chapter_{missing_number}.txt")
+
+
+def prompt_for_destructive_confirmation() -> bool:
+    """Require an explicit yes confirmation before destructive operations."""
+    print("This will overwrite current project state. Continue? (yes/no)")
+    try:
+        response = input("> ").strip()
+    except EOFError:
+        print()
+        return False
+    return response == "yes"
+
+
+def create_canon_memory_backup() -> None:
+    """Create a timestamped canon memory backup before rebuild operations."""
+    BACKUPS_DIR.mkdir(parents=True, exist_ok=True)
+    backup_timestamp = datetime.utcnow().strftime("%Y%m%d_%H%M%S")
+    backup_path = BACKUPS_DIR / f"canon_memory_backup_{backup_timestamp}.txt"
+    backup_content = (
+        CANON_MEMORY_PATH.read_text(encoding="utf-8")
+        if CANON_MEMORY_PATH.exists()
+        else ""
+    )
+    atomic_write(backup_path, backup_content)
+    print("Canon memory backup created.")
+
+
 
 # ============================================================
 # Input helpers
@@ -2178,7 +2261,19 @@ def handle_book_integrity(client: Any) -> None:
         print("No chapter files found in ~/writing/novel_project/chapters/")
         return
 
-    full_novel_block = build_manuscript_text(chapter_paths).strip()
+    chapter_blocks: list[str] = []
+    for chapter_path in chapter_paths:
+        chapter_number = extract_chapter_number(chapter_path)
+        if chapter_number is None:
+            continue
+        chapter_text = clean_terminal_text(chapter_path.read_text(encoding="utf-8"))
+        chapter_blocks.append(f"CHAPTER {chapter_number}\n\n{chapter_text}")
+
+    chunked_blocks = chunk_text_blocks(chapter_blocks)
+    if not chunked_blocks:
+        print("No chapter text found.")
+        return
+
     canon_memory_block = load_memory_block(full=True)
     world_rules_block = (
         read_text_file(WORLD_RULES_PATH)
@@ -2186,18 +2281,41 @@ def handle_book_integrity(client: Any) -> None:
         else "(not provided)"
     )
 
-    messages = build_book_integrity_messages(
-        full_novel_block=full_novel_block,
-        canon_memory_block=canon_memory_block,
-        world_rules_block=world_rules_block,
-    )
-
     try:
-        report = request_chat_completion(
-            client=client,
-            messages=messages,
-            temperature=CONTINUITY_TEMPERATURE,
-        )
+        chunk_reports: list[str] = []
+        for chunk_index, chunk_text in enumerate(chunked_blocks, start=1):
+            print(f"Analyzing chunk {chunk_index}/{len(chunked_blocks)}...")
+            chunk_report = request_chat_completion(
+                client=client,
+                messages=build_book_integrity_messages(
+                    full_novel_block=chunk_text,
+                    canon_memory_block=canon_memory_block,
+                    world_rules_block=world_rules_block,
+                ),
+                temperature=CONTINUITY_TEMPERATURE,
+            )
+            chunk_reports.append(chunk_report)
+
+        if len(chunk_reports) == 1:
+            report = chunk_reports[0]
+        else:
+            merge_messages = build_book_integrity_messages(
+                full_novel_block=(
+                    "Merge these per-chunk book-integrity analyses into one final report. "
+                    "Preserve concrete issues, remove duplicates, and keep recommendations actionable.\n\n"
+                    + "\n\n".join(
+                        f"Chunk {index} report:\n{chunk_report}"
+                        for index, chunk_report in enumerate(chunk_reports, start=1)
+                    )
+                ),
+                canon_memory_block=canon_memory_block,
+                world_rules_block=world_rules_block,
+            )
+            report = request_chat_completion(
+                client=client,
+                messages=merge_messages,
+                temperature=CONTINUITY_TEMPERATURE,
+            )
     except Exception as exc:  # Keep terminal app stable for the user.
         print(f"Book integrity analysis failed: {exc}")
         return
@@ -2216,21 +2334,40 @@ def handle_book_integrity(client: Any) -> None:
     print(f"Book integrity report saved to {report_path}.")
 
 
-def handle_rebuild_memory(client: Any) -> None:
+def handle_rebuild_memory(client: Any, command_text: str = "") -> None:
     """Rebuild canon memory for the whole novel or one chapter."""
     ensure_project_files()
-    print("Rebuild options:")
-    print()
-    print("1) Rebuild entire novel")
-    print("2) Rebuild single chapter")
+    normalized_command = command_text.strip().lower()
+    forced_full = normalized_command.startswith("/rebuild-memory full")
+    forced_single = normalized_command.startswith("/rebuild-memory single")
 
-    try:
-        selection = input("> ").strip()
-    except EOFError:
+    selection = ""
+    if forced_full:
+        selection = "1"
+    elif forced_single:
+        selection = "2"
+    else:
+        print("Rebuild options:")
         print()
-        return
+        print("1) Rebuild entire novel")
+        print("2) Rebuild single chapter")
+
+        try:
+            selection = input("> ").strip()
+        except EOFError:
+            print()
+            return
 
     if selection == "1":
+        if not prompt_for_destructive_confirmation():
+            print("Rebuild aborted.")
+            return
+        try:
+            create_canon_memory_backup()
+        except OSError as exc:
+            print(f"Could not create canon memory backup: {exc}")
+            return
+
         if not CHAPTERS_DIR.exists():
             print(f"Missing chapters directory: {CHAPTERS_DIR}")
             return
@@ -2291,6 +2428,12 @@ def handle_rebuild_memory(client: Any) -> None:
         return
 
     if selection == "2":
+        try:
+            create_canon_memory_backup()
+        except OSError as exc:
+            print(f"Could not create canon memory backup: {exc}")
+            return
+
         chapter_number = prompt_for_chapter_number()
         if chapter_number is None:
             return
@@ -2549,20 +2692,35 @@ def handle_chapter_summary(client: Any) -> None:
         )
 
 
-def handle_draft_pass(client: Any) -> None:
+def handle_draft_pass(client: Any, command_text: str = "") -> None:
     """Run a structured editorial analysis pass without modifying project files."""
-    print("Select analysis mode:")
-    print()
-    print("1 — Structure")
-    print("2 — Tension")
-    print("3 — Character")
-    print("4 — Clarity")
+    normalized_command = command_text.strip().lower()
+    flag_to_selection = {
+        "--structure": "1",
+        "--tension": "2",
+        "--character": "3",
+        "--clarity": "4",
+    }
+    preselected_mode = next(
+        (selection for flag, selection in flag_to_selection.items() if flag in normalized_command),
+        "",
+    )
 
-    try:
-        mode_selection = input("> ").strip()
-    except EOFError:
+    if not preselected_mode:
+        print("Select analysis mode:")
         print()
-        return
+        print("1 — Structure")
+        print("2 — Tension")
+        print("3 — Character")
+        print("4 — Clarity")
+
+        try:
+            mode_selection = input("> ").strip()
+        except EOFError:
+            print()
+            return
+    else:
+        mode_selection = preselected_mode
 
     dimension_map = {
         "1": (
@@ -2624,6 +2782,7 @@ def handle_draft_pass(client: Any) -> None:
         return
 
     text_to_analyse = ""
+    chapter_chunks: list[str] = []
     if scope_selection == "1":
         print("Enter chapter number:")
         try:
@@ -2661,10 +2820,11 @@ def handle_draft_pass(client: Any) -> None:
             chapter_text = clean_terminal_text(chapter_path.read_text(encoding="utf-8"))
             chapter_blocks.append(f"CHAPTER {chapter_number}\n\n{chapter_text}")
 
-        text_to_analyse = "\n\n".join(chapter_blocks).strip()
-        if not text_to_analyse:
+        chapter_chunks = chunk_text_blocks(chapter_blocks)
+        if not chapter_chunks:
             print("No chapter text found.")
             return
+        text_to_analyse = "\n\n".join(chapter_chunks).strip()
     else:
         print("Invalid selection. Enter 1 or 2.")
         return
@@ -2674,15 +2834,52 @@ def handle_draft_pass(client: Any) -> None:
         return
 
     try:
-        result = request_chat_completion(
-            client=client,
-            messages=build_draft_pass_messages(
-                text_to_analyse=text_to_analyse,
-                dimension_name=dimension_name,
-                dimension_instructions=dimension_instructions,
-            ),
-            temperature=DRAFT_PASS_TEMPERATURE,
-        )
+        if scope_selection == "2":
+            chunk_results: list[str] = []
+            for chunk_index, chunk_text in enumerate(chapter_chunks, start=1):
+                print(f"Analysing chunk {chunk_index}/{len(chapter_chunks)}...")
+                chunk_results.append(
+                    request_chat_completion(
+                        client=client,
+                        messages=build_draft_pass_messages(
+                            text_to_analyse=chunk_text,
+                            dimension_name=dimension_name,
+                            dimension_instructions=dimension_instructions,
+                        ),
+                        temperature=DRAFT_PASS_TEMPERATURE,
+                    )
+                )
+
+            if len(chunk_results) == 1:
+                result = chunk_results[0]
+            else:
+                merge_prompt = (
+                    "Merge the following draft-pass chunk analyses into one final report. "
+                    "Keep duplicates removed, preserve specific issues, and output one coherent pass report.\n\n"
+                    + "\n\n".join(
+                        f"Chunk {index} analysis:\n{chunk_result}"
+                        for index, chunk_result in enumerate(chunk_results, start=1)
+                    )
+                )
+                result = request_chat_completion(
+                    client=client,
+                    messages=build_draft_pass_messages(
+                        text_to_analyse=merge_prompt,
+                        dimension_name=dimension_name,
+                        dimension_instructions=dimension_instructions,
+                    ),
+                    temperature=DRAFT_PASS_TEMPERATURE,
+                )
+        else:
+            result = request_chat_completion(
+                client=client,
+                messages=build_draft_pass_messages(
+                    text_to_analyse=text_to_analyse,
+                    dimension_name=dimension_name,
+                    dimension_instructions=dimension_instructions,
+                ),
+                temperature=DRAFT_PASS_TEMPERATURE,
+            )
     except Exception as exc:  # Keep terminal app stable for the user.
         print(f"Draft pass failed: {exc}")
         return
@@ -2701,6 +2898,7 @@ def handle_build_book() -> None:
     if not chapter_paths:
         print("No chapter files found.")
         return
+    warn_for_missing_chapter_files(chapter_paths)
 
     manuscript_text = build_manuscript_text(chapter_paths)
 
@@ -2715,7 +2913,7 @@ def handle_build_book() -> None:
 
 
 
-def handle_save_draft() -> None:
+def handle_draft_save() -> None:
     """Snapshot all chapters into a timestamped draft manuscript."""
     if not CHAPTERS_DIR.exists():
         print("No chapter files found.")
@@ -2755,7 +2953,7 @@ def load_sorted_draft_paths() -> list[Path]:
     return sorted(draft_paths, key=lambda path: path.name)
 
 
-def handle_list_drafts() -> list[Path]:
+def handle_draft_list() -> list[Path]:
     """Print a numbered list of draft files and return them."""
     draft_paths = load_sorted_draft_paths()
     if not draft_paths:
@@ -2819,10 +3017,14 @@ def split_manuscript_into_chapters(text: str) -> list[tuple[int, str]]:
     return chapters
 
 
-def handle_restore_draft() -> None:
+def handle_draft_load() -> None:
     """Restore chapter files from a selected draft snapshot."""
-    draft_paths = handle_list_drafts()
+    draft_paths = handle_draft_list()
     if not draft_paths:
+        return
+
+    if not prompt_for_destructive_confirmation():
+        print("Draft load aborted.")
         return
 
     print("Choose draft number:")
@@ -2865,6 +3067,21 @@ def handle_restore_draft() -> None:
     print("Draft restored successfully.")
 
 
+def handle_save_draft() -> None:
+    """Legacy alias for /draft-save."""
+    handle_draft_save()
+
+
+def handle_list_drafts() -> list[Path]:
+    """Legacy alias for /draft-list."""
+    return handle_draft_list()
+
+
+def handle_restore_draft() -> None:
+    """Legacy alias for /draft-load."""
+    handle_draft_load()
+
+
 def handle_ideas() -> None:
     """Capture a freeform writing idea without affecting assistant state."""
     print("Paste idea. Type END on a new line when finished.")
@@ -2879,6 +3096,34 @@ def handle_ideas() -> None:
         append_idea(idea_text)
     except OSError:
         print("Idea could not be saved.")
+
+
+def handle_novel_stats() -> None:
+    """Print chapter and wordcount telemetry for the current novel project."""
+    ensure_project_files()
+    chapter_paths = load_sorted_chapter_paths()
+    if not chapter_paths:
+        print("No chapter files found.")
+        return
+
+    chapter_wordcounts: list[tuple[str, int]] = []
+    total_words = 0
+    for chapter_path in chapter_paths:
+        chapter_text = clean_terminal_text(chapter_path.read_text(encoding="utf-8"))
+        wordcount = len(chapter_text.split())
+        chapter_wordcounts.append((chapter_path.name, wordcount))
+        total_words += wordcount
+
+    total_chapters = len(chapter_wordcounts)
+    average_words = total_words / total_chapters if total_chapters else 0.0
+    longest_chapter = max(chapter_wordcounts, key=lambda item: item[1])
+    shortest_chapter = min(chapter_wordcounts, key=lambda item: item[1])
+
+    print(f"Total chapters: {total_chapters}")
+    print(f"Total wordcount: {total_words}")
+    print(f"Average words per chapter: {average_words:.2f}")
+    print(f"Longest chapter: {longest_chapter[0]} ({longest_chapter[1]} words)")
+    print(f"Shortest chapter: {shortest_chapter[0]} ({shortest_chapter[1]} words)")
 
 
 TIMELINE_STOPWORDS = {
@@ -3292,6 +3537,7 @@ def handle_export_book_docx() -> None:
     if not chapter_paths:
         print("No chapter files found in ~/writing/novel_project/chapters/")
         return
+    warn_for_missing_chapter_files(chapter_paths)
 
     title = "Untitled Novel"
     if CANON_MEMORY_PATH.exists() and CANON_MEMORY_PATH.is_file():
@@ -3378,8 +3624,15 @@ def handle_export_book_docx() -> None:
         timestamp = datetime.utcnow().strftime("%Y%m%d_%H%M%S")
         output_path = MANUSCRIPT_DIR / f"novel_{timestamp}.docx"
 
-    document.save(str(output_path))
-    print("DOCX manuscript export complete.")
+    try:
+        document.save(str(output_path))
+    except Exception as exc:  # Keep terminal app stable for the user.
+        print(f"Export failed: {exc}")
+        return
+
+    output_display = str(output_path).replace(str(Path.home()), "~", 1)
+    print("DOCX manuscript export complete:")
+    print(output_display)
 
 
 # ============================================================
@@ -3401,42 +3654,43 @@ def print_help() -> None:
     """Show available commands."""
     print("Available commands:")
     print()
-    print("=== WRITING WORKFLOW ===")
+    print("WRITING")
     print("/scene-summary")
     print("/proofread")
-    print("/idea-resurface")
     print()
-    print("=== STORY ANALYSIS ===")
-    print("/continuity-check")
+    print("MEMORY")
+    print("/rebuild-memory")
     print("/story-state")
-    print("/chapter-summary")
     print("/timeline-view")
     print()
-    print("=== MEMORY MANAGEMENT ===")
-    print("/rebuild-memory")
+    print("IDEAS")
+    print("/ideas")
+    print("/idea-resurface")
     print()
-    print("=== BOOK BUILDING ===")
-    print("/build-book")
-    print("/export-book --docx")
-    print()
-    print("=== DRAFTING ENGINE ===")
+    print("DRAFTS")
+    print("/draft-save")
+    print("/draft-list")
+    print("/draft-load")
     print("/draft-pass --structure")
     print("/draft-pass --tension")
-    print("/draft-pass --character")
-    print("/draft-pass --clarity")
     print()
-    print("=== VERSIONING ===")
-    print("/draft-save")
+    print("BOOK")
+    print("/build-book")
+    print("/export-book --docx")
+    print("/book-integrity")
     print()
-    print("=== WORLD SYSTEM ===")
-    print("/world-add")
-    print()
-    print("=== IDEA STORAGE ===")
-    print("/ideas")
-    print()
-    print("=== SYSTEM ===")
+    print("SYSTEM")
+    print("/novel-stats")
     print("/help")
     print("exit")
+
+
+def handle_export_book(command_text: str = "") -> None:
+    """Route /export-book options to concrete export handlers."""
+    if "--docx" in command_text:
+        handle_export_book_docx()
+        return
+    print("Unsupported export option. Use /export-book --docx")
 
 
 
@@ -3452,27 +3706,31 @@ def main() -> None:
 
     conversation_history: list[dict[str, str]] = []
 
-    command_handlers: dict[str, Callable[[], None]] = {
-        "/scene-summary": lambda: handle_scene_summary(client),
-        "/chapter-summary": lambda: handle_chapter_summary(client),
-        "/rebuild-summaries": lambda: handle_rebuild_summaries(client),
-        "/rebuild-memory": lambda: handle_rebuild_memory(client),
-        "/continuity-check": lambda: handle_continuity_check(client),
-        "/book-integrity": lambda: handle_book_integrity(client),
-        "/proofread": lambda: handle_proofread(client),
-        "/idea-resurface": lambda: handle_idea_resurface(client),
-        "/draft-pass": lambda: handle_draft_pass(client),
-        "/build-book": handle_build_book,
-        "/save-draft": handle_save_draft,
-        "/drafts": handle_list_drafts,
-        "/restore-draft": handle_restore_draft,
-        "/ideas": handle_ideas,
-        "/world-add": handle_world_add,
-        "/timeline-view": handle_timeline_view,
-        "/story-state": handle_story_state,
-        "/export-chapter": handle_export_chapter,
-        "/export-book --docx": handle_export_book_docx,
-        "/help": print_help,
+    command_handlers: dict[str, Callable[[str], None]] = {
+        "/scene-summary": lambda command_text="": handle_scene_summary(client),
+        "/chapter-summary": lambda command_text="": handle_chapter_summary(client),
+        "/rebuild-summaries": lambda command_text="": handle_rebuild_summaries(client),
+        "/rebuild-memory": lambda command_text="": handle_rebuild_memory(client, command_text),
+        "/continuity-check": lambda command_text="": handle_continuity_check(client),
+        "/book-integrity": lambda command_text="": handle_book_integrity(client),
+        "/proofread": lambda command_text="": handle_proofread(client),
+        "/idea-resurface": lambda command_text="": handle_idea_resurface(client),
+        "/draft-pass": lambda command_text="": handle_draft_pass(client, command_text),
+        "/build-book": lambda command_text="": handle_build_book(),
+        "/draft-save": lambda command_text="": handle_draft_save(),
+        "/draft-list": lambda command_text="": handle_draft_list(),
+        "/draft-load": lambda command_text="": handle_draft_load(),
+        "/save-draft": lambda command_text="": handle_draft_save(),
+        "/drafts": lambda command_text="": handle_draft_list(),
+        "/restore-draft": lambda command_text="": handle_draft_load(),
+        "/ideas": lambda command_text="": handle_ideas(),
+        "/world-add": lambda command_text="": handle_world_add(),
+        "/timeline-view": lambda command_text="": handle_timeline_view(),
+        "/story-state": lambda command_text="": handle_story_state(),
+        "/export-chapter": lambda command_text="": handle_export_chapter(),
+        "/export-book": handle_export_book,
+        "/novel-stats": lambda command_text="": handle_novel_stats(),
+        "/help": lambda command_text="": print_help(),
     }
 
     print_welcome()
@@ -3496,8 +3754,14 @@ def main() -> None:
             break
 
 
-        if user_input in command_handlers:
-            command_handlers[user_input]()
+        routed = False
+        for command_name in sorted(command_handlers.keys(), key=len, reverse=True):
+            if user_input == command_name or user_input.startswith(f"{command_name} "):
+                command_handlers[command_name](user_input)
+                routed = True
+                break
+
+        if routed:
             continue
 
         memory_block = load_memory_block()
