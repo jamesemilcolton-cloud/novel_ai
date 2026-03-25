@@ -2,9 +2,9 @@ from __future__ import annotations
 
 import os
 import re
-from collections import OrderedDict
+from collections import Counter, OrderedDict
 from copy import deepcopy
-from datetime import datetime
+from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Any, Callable
 
@@ -22,6 +22,7 @@ CHAPTERS_DIR = NOVEL_PROJECT_DIR / "chapters"
 MANUSCRIPT_DIR = NOVEL_PROJECT_DIR / "manuscript"
 MANUSCRIPT_PATH = MANUSCRIPT_DIR / "novel.txt"
 CONTINUITY_REPORTS_DIR = PROJECT_ANALYSIS_DIR / "continuity_reports"
+TIMELINE_LOGS_DIR = PROJECT_ANALYSIS_DIR / "timeline_logs"
 BOOK_INTEGRITY_REPORTS_DIR = PROJECT_ANALYSIS_DIR / "book_integrity_reports"
 REBUILD_LOG_DIR = PROJECT_ANALYSIS_DIR / "rebuild_logs"
 DRAFTS_DIR = NOVEL_PROJECT_DIR / "drafts"
@@ -626,6 +627,7 @@ def ensure_project_files() -> None:
     MANUSCRIPT_DIR.mkdir(parents=True, exist_ok=True)
     (NOVEL_PROJECT_DIR / "sources").mkdir(parents=True, exist_ok=True)
     CONTINUITY_REPORTS_DIR.mkdir(parents=True, exist_ok=True)
+    TIMELINE_LOGS_DIR.mkdir(parents=True, exist_ok=True)
     BOOK_INTEGRITY_REPORTS_DIR.mkdir(parents=True, exist_ok=True)
     REBUILD_LOG_DIR.mkdir(parents=True, exist_ok=True)
     RESEARCH_DIR.mkdir(parents=True, exist_ok=True)
@@ -3457,6 +3459,283 @@ def handle_novel_stats() -> None:
     print(f"Shortest chapter: {shortest_chapter[0]} ({shortest_chapter[1]} words)")
 
 
+def handle_system_health() -> None:
+    """Run a deep non-AI filesystem diagnostic of novel project health."""
+    now_utc = datetime.utcnow()
+
+    chapters_dir = Path.home() / "writing" / "novel_project" / "chapters"
+    canon_memory_path = Path.home() / "writing" / "novel_project" / "memory" / "canon_memory.txt"
+    drafts_dir = Path.home() / "writing" / "novel_project" / "drafts"
+    research_dir = Path.home() / "writing" / "novel_project" / "research"
+    analysis_dir = Path.home() / "writing" / "novel_project" / "analysis"
+    continuity_logs_dir = analysis_dir / "continuity_reports"
+    timeline_logs_dir = analysis_dir / "timeline_logs"
+    rebuild_logs_dir = analysis_dir / "rebuild_logs"
+
+    def safe_read_text(path: Path) -> str:
+        try:
+            return path.read_text(encoding="utf-8")
+        except OSError:
+            return ""
+
+    def word_count(text: str) -> int:
+        return len(re.findall(r"\b\w+\b", text))
+
+    def format_bytes(byte_count: int) -> str:
+        mb = byte_count / (1024 * 1024)
+        return f"{mb:.2f} MB"
+
+    def list_files(path: Path) -> list[Path]:
+        if not path.exists() or not path.is_dir():
+            return []
+        return [item for item in path.iterdir() if item.is_file()]
+
+    severity_rank = {"GOOD": 0, "STABLE": 1, "WARNING": 2, "CRITICAL": 3}
+    overall_status = "GOOD"
+    warnings: list[str] = []
+
+    # --------------------------------------------------------
+    # Check area 1 — Manuscript health
+    # --------------------------------------------------------
+    chapter_entries: list[tuple[int, Path]] = []
+    if chapters_dir.exists() and chapters_dir.is_dir():
+        for path in chapters_dir.iterdir():
+            if not path.is_file():
+                continue
+            match = CHAPTER_FILENAME_PATTERN.fullmatch(path.name)
+            if match is None:
+                continue
+            chapter_entries.append((int(match.group(1)), path))
+    chapter_entries.sort(key=lambda item: item[0])
+
+    chapter_numbers = [number for number, _ in chapter_entries]
+    missing_numbers: list[int] = []
+    if chapter_numbers:
+        expected_numbers = set(range(chapter_numbers[0], chapter_numbers[-1] + 1))
+        missing_numbers = sorted(expected_numbers - set(chapter_numbers))
+
+    words_per_chapter: list[tuple[int, int]] = []
+    total_words = 0
+    flagged_chapters: list[str] = []
+    for chapter_number, chapter_path in chapter_entries:
+        chapter_text = safe_read_text(chapter_path)
+        chapter_words = word_count(chapter_text)
+        words_per_chapter.append((chapter_number, chapter_words))
+        total_words += chapter_words
+        if chapter_words == 0:
+            flagged_chapters.append(f"chapter_{chapter_number}: EMPTY")
+        elif chapter_words < 1200:
+            flagged_chapters.append(f"chapter_{chapter_number}: SHORT")
+        elif chapter_words > 7000:
+            flagged_chapters.append(f"chapter_{chapter_number}: VERY LONG")
+
+    if total_words > 150000:
+        warnings.append("Total novel size exceeds 150k words (HIGH scale warning).")
+
+    # --------------------------------------------------------
+    # Check area 2 — Canon memory health
+    # --------------------------------------------------------
+    total_facts = 0
+    duplicate_facts_count = 0
+    unresolved_states = 0
+    chapter_headers_without_facts = 0
+    canon_memory_characters = 0
+
+    if not canon_memory_path.exists():
+        warnings.append("Canon memory file missing.")
+    else:
+        canon_content = safe_read_text(canon_memory_path)
+        canon_memory_characters = len(canon_content)
+        parsed_chapters = parse_canon_memory(canon_content)
+
+        normalized_facts: list[str] = []
+        for chapter in parsed_chapters:
+            chapter_fact_total = sum(
+                len(facts)
+                for facts in chapter.get("categories", {}).values()
+            )
+            if chapter_fact_total == 0:
+                chapter_headers_without_facts += 1
+            total_facts += chapter_fact_total
+
+            for category_facts in chapter.get("categories", {}).values():
+                for fact in category_facts:
+                    normalized = get_fact_text(fact).strip().lower()
+                    if normalized:
+                        normalized_facts.append(normalized)
+
+            unresolved_states += sum(
+                1
+                for story_state in chapter.get("story_states", [])
+                if str(story_state.get("state", "ACTIVE")).upper() == "ACTIVE"
+            )
+
+        fact_counts = Counter(normalized_facts)
+        duplicate_facts_count = sum(count - 1 for count in fact_counts.values() if count > 1)
+
+    # --------------------------------------------------------
+    # Check area 3 — Draft system health
+    # --------------------------------------------------------
+    draft_files = list_files(drafts_dir)
+    total_drafts = len(draft_files)
+    latest_draft_time: datetime | None = None
+    timestamp_keys: list[str] = []
+    for draft_file in draft_files:
+        try:
+            stat = draft_file.stat()
+        except OSError:
+            continue
+        modified = datetime.utcfromtimestamp(stat.st_mtime)
+        if latest_draft_time is None or modified > latest_draft_time:
+            latest_draft_time = modified
+
+        timestamp_match = re.fullmatch(r"draft_(\d{8}_\d{4})(?:_.+)?\.txt", draft_file.name)
+        if timestamp_match is not None:
+            timestamp_keys.append(timestamp_match.group(1))
+
+    if latest_draft_time is None:
+        warnings.append("No drafts found.")
+        last_draft_display = "NONE"
+    else:
+        last_draft_display = latest_draft_time.strftime("%Y-%m-%d %H:%M UTC")
+        if latest_draft_time < now_utc - timedelta(days=7):
+            warnings.append("No draft saved in the last 7 days.")
+
+    duplicate_timestamp_collisions = sum(
+        1
+        for count in Counter(timestamp_keys).values()
+        if count > 1
+    )
+    if duplicate_timestamp_collisions > 0:
+        warnings.append("Duplicate draft timestamp naming collision risk detected.")
+
+    # --------------------------------------------------------
+    # Check area 4 — Research system health
+    # --------------------------------------------------------
+    research_files = list_files(research_dir)
+    total_research_topics = 0
+    research_characters = 0
+    for research_file in research_files:
+        if research_file.parent == research_dir and research_file.suffix.lower() == ".txt":
+            total_research_topics += 1
+        research_characters += len(safe_read_text(research_file))
+
+    integrity_reports_present = (research_dir / "integrity_reports").exists()
+    if research_characters > 200000:
+        warnings.append("Research corpus exceeds 200k characters (realism audit scaling risk).")
+
+    # --------------------------------------------------------
+    # Check area 5 — Analysis log health
+    # --------------------------------------------------------
+    def collect_log_stats(path: Path) -> tuple[int, int]:
+        files = list_files(path)
+        total_size = 0
+        for file_path in files:
+            try:
+                total_size += file_path.stat().st_size
+            except OSError:
+                continue
+        return len(files), total_size
+
+    continuity_count, continuity_size = collect_log_stats(continuity_logs_dir)
+    timeline_count, timeline_size = collect_log_stats(timeline_logs_dir)
+    rebuild_count, rebuild_size = collect_log_stats(rebuild_logs_dir)
+
+    for log_name, log_size in (
+        ("continuity_reports", continuity_size),
+        ("timeline_logs", timeline_size),
+        ("rebuild_logs", rebuild_size),
+    ):
+        if log_size > 20 * 1024 * 1024:
+            warnings.append(f"{log_name} exceeds 20MB (log cleanup recommended).")
+
+    # --------------------------------------------------------
+    # Check area 6 — Chunking / performance risk
+    # --------------------------------------------------------
+    average_chapter_words = (
+        total_words / len(words_per_chapter) if words_per_chapter else 0.0
+    )
+    chunking_risk = "LOW"
+    memory_scale_risk = "LOW"
+    rebuild_scale_risk = "LOW"
+
+    if len(words_per_chapter) > 25 or average_chapter_words > 5000:
+        chunking_risk = "HIGH"
+        warnings.append("Chunking/performance risk elevated for full-novel operations.")
+
+    if canon_memory_characters > 80000:
+        memory_scale_risk = "HIGH"
+        warnings.append("Canon memory exceeds 80k characters (memory drift risk).")
+
+    if rebuild_count > 100:
+        rebuild_scale_risk = "HIGH"
+        warnings.append("Rebuild logs exceed 100 files (maintenance required).")
+
+    if any("HIGH" in warning for warning in warnings):
+        overall_status = "CRITICAL"
+    elif warnings:
+        overall_status = "WARNING"
+    elif len(words_per_chapter) == 0 and total_drafts == 0 and total_research_topics == 0:
+        overall_status = "STABLE"
+
+    if severity_rank[overall_status] < severity_rank["WARNING"] and chapter_headers_without_facts > 0:
+        overall_status = "STABLE"
+
+    if overall_status == "CRITICAL":
+        recommended_action = "Run /draft-save immediately and clean high-risk areas."
+    elif overall_status == "WARNING":
+        recommended_action = "Run /draft-save soon and resolve warnings."
+    elif overall_status == "STABLE":
+        recommended_action = "Proceed with writing and monitor weekly."
+    else:
+        recommended_action = "Continue normal workflow."
+
+    missing_numbers_display = ", ".join(str(number) for number in missing_numbers) if missing_numbers else "None"
+    flagged_chapter_display = "; ".join(flagged_chapters) if flagged_chapters else "None"
+
+    print("SYSTEM HEALTH REPORT")
+    print()
+    print("Manuscript:")
+    print(f"- total chapters: {len(words_per_chapter)}")
+    print(f"- missing chapter numbers: {missing_numbers_display}")
+    print(f"- total words: {total_words}")
+    print(f"- flagged chapters: {flagged_chapter_display}")
+    print()
+    print("Canon Memory:")
+    print(f"- total facts: {total_facts}")
+    print(f"- duplicates: {duplicate_facts_count}")
+    print(f"- unresolved states: {unresolved_states}")
+    print()
+    print("Draft System:")
+    print(f"- total drafts: {total_drafts}")
+    print(f"- last draft: {last_draft_display}")
+    print()
+    print("Research System:")
+    print(f"- total research topics: {total_research_topics}")
+    print(f"- integrity reports present: {'YES' if integrity_reports_present else 'NO'}")
+    print()
+    print("Analysis Logs:")
+    print(f"- continuity logs: {continuity_count} files ({format_bytes(continuity_size)})")
+    print(f"- timeline logs: {timeline_count} files ({format_bytes(timeline_size)})")
+    print(f"- rebuild logs: {rebuild_count} files ({format_bytes(rebuild_size)})")
+    print()
+    print("Performance Risk:")
+    print(f"- chunking risk: {chunking_risk}")
+    print(f"- memory scale risk: {memory_scale_risk}")
+    print(f"- rebuild scale risk: {rebuild_scale_risk}")
+    print()
+    print(f"OVERALL STATUS: {overall_status}")
+    print()
+    print("Recommended Next Action:")
+    print(f"- {recommended_action}")
+
+    if warnings:
+        print()
+        print("Warnings:")
+        for warning in warnings:
+            print(f"- {warning}")
+
+
 TIMELINE_STOPWORDS = {
     "a", "an", "and", "approaches", "as", "at", "be", "been", "being", "by",
     "for", "from", "has", "have", "in", "into", "is", "it", "its", "later",
@@ -4326,6 +4605,7 @@ def print_help() -> None:
     print()
     print("SYSTEM")
     print("/novel-stats")
+    print("/help --system-health")
     print("/help --when")
     print("/help")
     print("exit")
@@ -4688,6 +4968,7 @@ def main() -> None:
         "/export-chapter": lambda command_text="": handle_export_chapter(),
         "/export-book": handle_export_book,
         "/novel-stats": lambda command_text="": handle_novel_stats(),
+        "/help --system-health": lambda command_text="": handle_system_health(),
         "/help --when": lambda command_text="": handle_help_when(),
         "/help": lambda command_text="": print_help(),
     }
