@@ -26,6 +26,7 @@ BOOK_INTEGRITY_REPORTS_DIR = PROJECT_ANALYSIS_DIR / "book_integrity_reports"
 REBUILD_LOG_DIR = PROJECT_ANALYSIS_DIR / "rebuild_logs"
 DRAFTS_DIR = NOVEL_PROJECT_DIR / "drafts"
 BACKUPS_DIR = NOVEL_PROJECT_DIR / "backups"
+RESEARCH_DIR = NOVEL_PROJECT_DIR / "research"
 CANON_MEMORY_PATH = PROJECT_MEMORY_DIR / "canon_memory.txt"
 SCENE_SUMMARIES_PATH = PROJECT_MEMORY_DIR / "scene_summaries.txt"
 IDEAS_PATH = PROJECT_MEMORY_DIR / "ideas.txt"
@@ -49,6 +50,7 @@ CONTINUITY_TEMPERATURE = 0.0
 PROOFREAD_TEMPERATURE = 0.1
 IDEA_RESURFACE_TEMPERATURE = 0.3
 DRAFT_PASS_TEMPERATURE = 0.2
+RESEARCH_TEMPERATURE = 0.0
 
 CONTINUITY_CHAPTER_WINDOW = 3
 MAX_SCENE_SUMMARIES = 5
@@ -61,6 +63,18 @@ Use the provided memory carefully and naturally.
 Be creative, clear, and practical.
 Do not invent persistent facts unless the user states them.
 """
+
+RESEARCH_DEPTH_OPTIONS: dict[str, str] = {
+    "1": "Surface realism",
+    "2": "Hard sci-fi realism",
+    "3": "Ultra deep technical realism",
+}
+
+RESEARCH_STYLE_OPTIONS: dict[str, str] = {
+    "1": "Scientific report",
+    "2": "Teaching explanation",
+    "3": "Practical notes",
+}
 
 SCREENPLAY_SOURCE_PATH = NOVEL_PROJECT_DIR / "sources" / "screenplay.pdf"
 ALLOWED_MEMORY_CATEGORIES = (
@@ -591,6 +605,7 @@ def ensure_project_files() -> None:
     CONTINUITY_REPORTS_DIR.mkdir(parents=True, exist_ok=True)
     BOOK_INTEGRITY_REPORTS_DIR.mkdir(parents=True, exist_ok=True)
     REBUILD_LOG_DIR.mkdir(parents=True, exist_ok=True)
+    RESEARCH_DIR.mkdir(parents=True, exist_ok=True)
     CANON_MEMORY_PATH.touch(exist_ok=True)
     SCENE_SUMMARIES_PATH.touch(exist_ok=True)
     IDEAS_PATH.touch(exist_ok=True)
@@ -1544,6 +1559,27 @@ def prompt_for_confirmation(prompt_text: str) -> bool:
     return response == "y"
 
 
+def prompt_for_research_choice(
+    prompt_text: str,
+    options: dict[str, str],
+) -> str | None:
+    """Prompt for a numbered research option and return the selected key."""
+    print(prompt_text)
+    for key, label in options.items():
+        print(f"{key} = {label}")
+    try:
+        choice = input("> ").strip()
+    except EOFError:
+        print()
+        return None
+
+    if choice not in options:
+        print("Invalid selection.")
+        return None
+
+    return choice
+
+
 
 def parse_memory_suggestions(result: str) -> list[tuple[int, str, str]]:
     """Parse numbered memory suggestions from the scene extractor output."""
@@ -2011,6 +2047,68 @@ def build_draft_pass_messages(
             "role": "user",
             "content": text_to_analyse,
         },
+    ]
+
+
+def build_research_messages(
+    question: str,
+    depth_choice: str,
+    style_choice: str,
+) -> list[dict[str, str]]:
+    """Build a dedicated isolated scientific research prompt."""
+    depth_label = RESEARCH_DEPTH_OPTIONS[depth_choice]
+    style_label = RESEARCH_STYLE_OPTIONS[style_choice]
+
+    depth_instructions = {
+        "1": (
+            "Depth target: Surface realism. Focus on accurate high-confidence fundamentals,"
+            " plain-language scientific framing, and practical real-world constraints."
+        ),
+        "2": (
+            "Depth target: Hard sci-fi realism. Include quantitative ranges where possible,"
+            " engineering constraints, operational failure modes, and physics-based feasibility."
+        ),
+        "3": (
+            "Depth target: Ultra deep technical realism. Provide highly technical treatment,"
+            " equations or scaling-law style reasoning when relevant, edge-case constraints,"
+            " and explicit uncertainty bounds."
+        ),
+    }[depth_choice]
+
+    style_instructions = {
+        "1": (
+            "Output style: Scientific report. Use precise technical prose with clear headings,"
+            " evidence-grounded claims, and concise analytical structure."
+        ),
+        "2": (
+            "Output style: Teaching explanation. Use pedagogical, step-by-step explanation while"
+            " remaining scientifically rigorous and fact-only."
+        ),
+        "3": (
+            "Output style: Practical notes. Use concise bullet-point guidance focused on implementation,"
+            " constraints, and decision-relevant facts."
+        ),
+    }[style_choice]
+
+    system_prompt = (
+        "You are a neutral scientific research consultant.\n"
+        "Provide only real-world scientific facts and clearly marked uncertainty.\n"
+        "Absolutely do not provide story suggestions, plot ideas, character advice, writing guidance,\n"
+        "creativity prompts, or any connection to a novel, screenplay, chapters, canon memory,\n"
+        "or narrative analysis.\n"
+        "Do not include speculative fantasy. If mentioning frontier hypotheses, label them clearly as\n"
+        "theoretical and not experimentally confirmed.\n"
+        "Always cover, where relevant: scale, timeframes, physical limits, environmental effects,\n"
+        "survivability, constraints, and engineering implications.\n"
+        f"{depth_instructions}\n"
+        f"{style_instructions}\n"
+        f"Selected realism depth: {depth_label}.\n"
+        f"Selected output style: {style_label}."
+    )
+
+    return [
+        {"role": "system", "content": system_prompt},
+        {"role": "user", "content": question},
     ]
 
 
@@ -3445,6 +3543,87 @@ def handle_story_state() -> None:
         print("No active narrative states recorded.")
 
 
+def handle_research_topic(client: Any) -> None:
+    """Run an isolated factual science research workflow."""
+    depth_choice = prompt_for_research_choice(
+        "Choose research depth:",
+        RESEARCH_DEPTH_OPTIONS,
+    )
+    if depth_choice is None:
+        return
+
+    style_choice = prompt_for_research_choice(
+        "Choose output style:",
+        RESEARCH_STYLE_OPTIONS,
+    )
+    if style_choice is None:
+        return
+
+    print("Paste research question. Type END on new line when finished.")
+    question = collect_multiline_input(end_marker="END")
+    if not question:
+        print("No research question entered.")
+        return
+
+    try:
+        research_notes = request_chat_completion(
+            client=client,
+            messages=build_research_messages(
+                question=question,
+                depth_choice=depth_choice,
+                style_choice=style_choice,
+            ),
+            temperature=RESEARCH_TEMPERATURE,
+        )
+    except Exception as exc:  # Keep terminal app stable for the user.
+        print(f"Research request failed: {exc}")
+        return
+
+    print()
+    print(research_notes)
+
+    if not prompt_for_confirmation("Save this research topic? (y/n)"):
+        return
+
+    print("Topic filename (example: neutron_star_collision):")
+    try:
+        filename_input = input("> ").strip()
+    except EOFError:
+        print()
+        return
+
+    if not filename_input:
+        print("No topic filename entered.")
+        return
+
+    safe_topic_name = re.sub(r"[^a-zA-Z0-9_-]+", "_", filename_input).strip("_")
+    if not safe_topic_name:
+        print("Invalid topic filename.")
+        return
+
+    RESEARCH_DIR.mkdir(parents=True, exist_ok=True)
+    output_path = RESEARCH_DIR / f"{safe_topic_name}.txt"
+    if output_path.exists():
+        timestamp_suffix = datetime.utcnow().strftime("%Y%m%d_%H%M")
+        output_path = RESEARCH_DIR / f"{safe_topic_name}_{timestamp_suffix}.txt"
+
+    file_body = (
+        f"TOPIC: {safe_topic_name}\n\n"
+        "QUESTION:\n"
+        f"{question}\n\n"
+        "RESEARCH NOTES:\n"
+        f"{research_notes}\n"
+    )
+
+    try:
+        atomic_write(output_path, file_body)
+    except OSError as exc:
+        print(f"Could not save research topic: {exc}")
+        return
+
+    print("Research topic saved.")
+
+
 def handle_world_add() -> None:
     """Capture and save one structured world rule entry."""
     print("Enter world rule category:")
@@ -3657,6 +3836,7 @@ def print_help() -> None:
     print("WRITING")
     print("/scene-summary")
     print("/proofread")
+    print("/research-topic")
     print()
     print("MEMORY")
     print("/rebuild-memory")
@@ -3714,6 +3894,7 @@ def main() -> None:
         "/continuity-check": lambda command_text="": handle_continuity_check(client),
         "/book-integrity": lambda command_text="": handle_book_integrity(client),
         "/proofread": lambda command_text="": handle_proofread(client),
+        "/research-topic": lambda command_text="": handle_research_topic(client),
         "/idea-resurface": lambda command_text="": handle_idea_resurface(client),
         "/draft-pass": lambda command_text="": handle_draft_pass(client, command_text),
         "/build-book": lambda command_text="": handle_build_book(),
