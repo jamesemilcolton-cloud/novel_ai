@@ -2173,6 +2173,45 @@ def build_research_scene_messages(
     ]
 
 
+def build_research_apply_messages(
+    research_notes: str,
+    scene_text: str,
+) -> list[dict[str, str]]:
+    """Build isolated realism-audit messages from saved research notes and scene text."""
+    system_prompt = (
+        "You are a scientific realism auditor.\n"
+        "Compare only the provided Research notes and Scene text.\n"
+        "Do not use any external context, canon memory, screenplay source, or creative interpretation.\n"
+        "Do not rewrite scenes.\n"
+        "Do not suggest plot changes.\n"
+        "Do not connect facts to story ideas.\n"
+        "Do not give writing advice.\n"
+        "Return ONLY a REALISM REPORT.\n\n"
+        "Required sections:\n"
+        "PHYSICS CONFLICTS\n"
+        "ENVIRONMENTAL CONFLICTS\n"
+        "SURVIVABILITY ISSUES\n"
+        "SCALE / TIMEFRAME ERRORS\n"
+        "ENGINEERING IMPOSSIBILITIES\n"
+        "ENERGY OR FORCE INACCURACIES\n\n"
+        "Rules:\n"
+        "- Be factual\n"
+        "- Be concise\n"
+        "- Do NOT suggest solutions\n"
+        "- Do NOT rewrite\n"
+        "- Do NOT be creative\n"
+        "- If no issues, return exactly: No realism conflicts detected."
+    )
+
+    return [
+        {"role": "system", "content": system_prompt},
+        {
+            "role": "user",
+            "content": f"Research notes:\n{research_notes}\n\nScene text:\n{scene_text}",
+        },
+    ]
+
+
 # ============================================================
 # Extraction helpers
 # ============================================================
@@ -3772,6 +3811,89 @@ def handle_research_scene(client: Any) -> None:
     print(final_report)
 
 
+def handle_research_apply(client: Any) -> None:
+    """Apply saved research notes to a scene or chapter for realism conflict auditing."""
+    if not RESEARCH_DIR.exists() or not RESEARCH_DIR.is_dir():
+        print("No research topics found.")
+        return
+
+    topic_files = sorted(path for path in RESEARCH_DIR.iterdir() if path.is_file())
+    if not topic_files:
+        print("No research topics found.")
+        return
+
+    print("Available research topics:")
+    for index, topic_path in enumerate(topic_files, start=1):
+        print(f"{index}. {topic_path.name}")
+
+    print("Select topic number.")
+    try:
+        topic_selection = input("> ").strip()
+    except EOFError:
+        print()
+        return
+
+    if not topic_selection.isdigit():
+        print("Invalid selection.")
+        return
+
+    topic_index = int(topic_selection)
+    if topic_index < 1 or topic_index > len(topic_files):
+        print("Invalid selection.")
+        return
+
+    selected_topic_path = topic_files[topic_index - 1]
+    research_notes = read_text_file(selected_topic_path)
+
+    print("Choose input type:")
+    print("1 = Paste scene")
+    print("2 = Choose chapter file")
+    try:
+        input_type = input("> ").strip()
+    except EOFError:
+        print()
+        return
+
+    scene_text = ""
+    if input_type == "1":
+        print("Paste scene text. Type END on new line when finished.")
+        scene_text = collect_multiline_input(end_marker="END")
+        if not scene_text:
+            print("No scene provided.")
+            return
+    elif input_type == "2":
+        chapter_number = prompt_for_chapter_number("Ask chapter number.")
+        if chapter_number is None:
+            return
+        chapter_path = CHAPTERS_DIR / f"chapter_{chapter_number}.txt"
+        if not chapter_path.exists() or not chapter_path.is_file():
+            print("Chapter file not found.")
+            return
+        scene_text = clean_terminal_text(chapter_path.read_text(encoding="utf-8"))
+        if not scene_text:
+            print("Chapter file is empty.")
+            return
+    else:
+        print("Invalid selection.")
+        return
+
+    try:
+        report = request_chat_completion(
+            client=client,
+            messages=build_research_apply_messages(
+                research_notes=research_notes,
+                scene_text=scene_text,
+            ),
+            temperature=RESEARCH_SCENE_TEMPERATURE,
+        )
+    except Exception as exc:  # Keep terminal app stable for the user.
+        print(f"Research realism audit failed: {exc}")
+        return
+
+    print()
+    print(report)
+
+
 def handle_world_add() -> None:
     """Capture and save one structured world rule entry."""
     print("Enter world rule category:")
@@ -3986,6 +4108,7 @@ def print_help() -> None:
     print("/proofread")
     print("/research-topic")
     print("/research-scene   → hard-science realism analysis for pasted scene")
+    print("/research-apply   → apply saved research topic as realism auditor")
     print()
     print("MEMORY")
     print("/rebuild-memory")
@@ -4045,6 +4168,7 @@ def main() -> None:
         "/proofread": lambda command_text="": handle_proofread(client),
         "/research-topic": lambda command_text="": handle_research_topic(client),
         "/research-scene": lambda command_text="": handle_research_scene(client),
+        "/research-apply": lambda command_text="": handle_research_apply(client),
         "/idea-resurface": lambda command_text="": handle_idea_resurface(client),
         "/draft-pass": lambda command_text="": handle_draft_pass(client, command_text),
         "/build-book": lambda command_text="": handle_build_book(),
