@@ -139,6 +139,58 @@ WORLD CONSISTENCY REPORT
 - issue
 """
 
+CHARACTER_CONSISTENCY_CHUNK_SYSTEM_PROMPT = """You are a strict psychological continuity auditor.
+
+Analyse ONLY behavioural consistency.
+
+Focus on:
+personality stability,
+motivation logic,
+emotional continuity,
+injury behaviour,
+relationship logic,
+competence realism,
+authority behaviour,
+knowledge continuity.
+
+Do NOT:
+give writing advice,
+rewrite scenes,
+comment on prose quality.
+
+If no issue exists in this chunk output EXACTLY:
+
+NO CHARACTER ISSUES IN THIS CHUNK
+
+Otherwise output:
+
+CHARACTER ISSUE
+- description
+"""
+
+CHARACTER_CONSISTENCY_SYNTHESIS_SYSTEM_PROMPT = """You are a senior character continuity auditor.
+
+Combine all chunk findings into one final report.
+
+- Remove duplicates
+- Merge related issues
+- Keep concise
+- Preserve factual tone
+
+If no issues exist output EXACTLY:
+
+CHARACTER CONSISTENCY REPORT
+
+Character behaviour remains consistent.
+
+Otherwise output:
+
+CHARACTER CONSISTENCY REPORT
+
+- issue
+- issue
+"""
+
 RESEARCH_DEPTH_OPTIONS: dict[str, str] = {
     "1": "Surface realism",
     "2": "Hard sci-fi realism",
@@ -2867,6 +2919,117 @@ def handle_world_consistency(client: Any) -> None:
     print(final_report)
 
 
+def handle_character_consistency(client: Any) -> None:
+    """Run a chunk-safe full-novel character behaviour consistency audit."""
+    ensure_project_files()
+
+    if not PROJECT_MEMORY_DIR.exists() or not PROJECT_MEMORY_DIR.is_dir():
+        print(f"Missing memory directory: {PROJECT_MEMORY_DIR}")
+        return
+
+    if not CANON_MEMORY_PATH.exists() or not CANON_MEMORY_PATH.is_file():
+        print(f"Missing canon memory file: {CANON_MEMORY_PATH}")
+        return
+
+    if not CHAPTERS_DIR.exists() or not CHAPTERS_DIR.is_dir():
+        print(f"Missing chapters directory: {CHAPTERS_DIR}")
+        return
+
+    try:
+        canon_memory = clean_terminal_text(CANON_MEMORY_PATH.read_text(encoding="utf-8")).strip()
+    except OSError as exc:
+        print(f"Could not read canon memory: {exc}")
+        return
+
+    if not canon_memory:
+        print(f"Canon memory is empty: {CANON_MEMORY_PATH}")
+        return
+
+    chapter_paths = load_sorted_chapter_paths()
+    if not chapter_paths:
+        print("No chapter files found in ~/writing/novel_project/chapters/")
+        return
+
+    chapter_blocks: list[str] = []
+    for chapter_path in chapter_paths:
+        chapter_number = extract_chapter_number(chapter_path)
+        if chapter_number is None:
+            continue
+        try:
+            chapter_text = clean_terminal_text(chapter_path.read_text(encoding="utf-8")).strip()
+        except OSError as exc:
+            print(f"Could not read {chapter_path.name}: {exc}")
+            return
+        if not chapter_text:
+            continue
+        chapter_blocks.append(f"CHAPTER {chapter_number}\n\n{chapter_text}")
+
+    if not chapter_blocks:
+        print("No chapter text found.")
+        return
+
+    chunk_blocks = chunk_text_blocks(chapter_blocks, max_chars=10000)
+    if not chunk_blocks:
+        print("No chapter text found.")
+        return
+
+    chunk_reports: list[str] = []
+    try:
+        for chunk_index, chunk_text in enumerate(chunk_blocks, start=1):
+            print(f"Analyzing chunk {chunk_index}/{len(chunk_blocks)}...")
+            chunk_report = request_chat_completion(
+                client=client,
+                messages=[
+                    {"role": "system", "content": CHARACTER_CONSISTENCY_CHUNK_SYSTEM_PROMPT},
+                    {
+                        "role": "user",
+                        "content": (
+                            f"Canon memory:\n\n{canon_memory}\n\n"
+                            f"Novel chunk:\n\n{chunk_text}"
+                        ),
+                    },
+                ],
+                temperature=CONTINUITY_TEMPERATURE,
+            ).strip()
+            chunk_reports.append(chunk_report)
+    except Exception as exc:  # Keep terminal app stable for the user.
+        print(f"Character consistency audit failed: {exc}")
+        return
+
+    issue_notes = [
+        report
+        for report in chunk_reports
+        if report and report.strip() != "NO CHARACTER ISSUES IN THIS CHUNK"
+    ]
+
+    if not issue_notes:
+        print()
+        print("CHARACTER CONSISTENCY REPORT")
+        print()
+        print("Character behaviour remains consistent.")
+        return
+
+    synthesis_payload = "\n\n".join(
+        f"Chunk {index} findings:\n{report}"
+        for index, report in enumerate(issue_notes, start=1)
+    )
+    try:
+        final_report = request_chat_completion(
+            client=client,
+            messages=[
+                {"role": "system", "content": CHARACTER_CONSISTENCY_SYNTHESIS_SYSTEM_PROMPT},
+                {"role": "user", "content": synthesis_payload},
+            ],
+            temperature=CONTINUITY_TEMPERATURE,
+        ).strip()
+    except Exception as exc:  # Keep terminal app stable for the user.
+        print(f"Character consistency synthesis failed: {exc}")
+        return
+
+    print()
+    print(final_report)
+
+
 def handle_rebuild_memory(client: Any, command_text: str = "") -> None:
     """Rebuild canon memory for the whole novel or one chapter."""
     ensure_project_files()
@@ -4778,6 +4941,7 @@ def print_help() -> None:
     print("/export-book --docx")
     print("/book-integrity")
     print("/world-consistency")
+    print("/character-consistency")
     print()
     print("SYSTEM")
     print("/novel-stats")
@@ -5124,6 +5288,7 @@ def main() -> None:
         "/continuity-check": lambda command_text="": handle_continuity_check(client),
         "/book-integrity": lambda command_text="": handle_book_integrity(client),
         "/world-consistency": lambda command_text="": handle_world_consistency(client),
+        "/character-consistency": lambda command_text="": handle_character_consistency(client),
         "/proofread": lambda command_text="": handle_proofread(client),
         "/research-topic": lambda command_text="": handle_research_topic(client),
         "/research-scene": lambda command_text="": handle_research_scene(client),
