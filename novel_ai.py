@@ -28,7 +28,7 @@ REBUILD_LOG_DIR = PROJECT_ANALYSIS_DIR / "rebuild_logs"
 FULL_NOVEL_PROCESSOR_LOG_DIR = NOVEL_PROJECT_DIR / "logs"
 FULL_NOVEL_PROCESSOR_LOG_PATH = FULL_NOVEL_PROCESSOR_LOG_DIR / "processor_log.txt"
 DRAFTS_DIR = NOVEL_PROJECT_DIR / "drafts"
-BACKUPS_DIR = NOVEL_PROJECT_DIR / "backups"
+CANON_MEMORY_BACKUPS_DIR = PROJECT_MEMORY_DIR / "backups"
 RESEARCH_DIR = NOVEL_PROJECT_DIR / "research"
 RESEARCH_INTEGRITY_REPORTS_DIR = RESEARCH_DIR / "integrity_reports"
 CANON_MEMORY_PATH = PROJECT_MEMORY_DIR / "canon_memory.txt"
@@ -803,6 +803,43 @@ def atomic_write(path: Path, text: str) -> None:
     tmp.replace(path)
 
 
+def create_canon_memory_guard_backup() -> Path:
+    """Create a timestamped canon memory backup for guarded writes."""
+    CANON_MEMORY_BACKUPS_DIR.mkdir(parents=True, exist_ok=True)
+    backup_timestamp = datetime.utcnow().strftime("%Y%m%d_%H%M%S")
+    backup_path = CANON_MEMORY_BACKUPS_DIR / f"canon_backup_{backup_timestamp}.txt"
+    backup_content = (
+        CANON_MEMORY_PATH.read_text(encoding="utf-8")
+        if CANON_MEMORY_PATH.exists()
+        else ""
+    )
+    atomic_write(backup_path, backup_content)
+    return backup_path
+
+
+def guarded_write_canon_memory(chapters: list[dict[str, Any]]) -> None:
+    """Safely write canon memory with pre-write backup and post-write validation."""
+    backup_path = create_canon_memory_guard_backup()
+    rendered_memory = render_canon_memory(chapters)
+
+    try:
+        parse_canon_memory(rendered_memory)
+    except Exception as exc:
+        raise OSError(f"Canon memory guard rejected invalid render: {exc}") from exc
+
+    atomic_write(CANON_MEMORY_PATH, rendered_memory)
+
+    try:
+        written_text = CANON_MEMORY_PATH.read_text(encoding="utf-8")
+        parse_canon_memory(written_text)
+    except Exception as exc:
+        rollback_text = backup_path.read_text(encoding="utf-8")
+        atomic_write(CANON_MEMORY_PATH, rollback_text)
+        raise OSError(
+            f"Canon memory guard restored from backup after validation failed: {exc}"
+        ) from exc
+
+
 
 def read_text_file(path: Path) -> str:
     """Read a text file and return cleaned text."""
@@ -1448,7 +1485,7 @@ def append_to_canon_memory(
     ])
     if saved_count > 0 or story_state_updates > 0:
         chapters = consolidate_story_states(chapters)
-        atomic_write(CANON_MEMORY_PATH, render_canon_memory(chapters))
+        guarded_write_canon_memory(chapters)
 
     print(f"Saved {saved_count} canon fact(s).")
     print(f"Skipped {skipped_duplicates} duplicate fact(s).")
@@ -1489,7 +1526,7 @@ def mark_fact_resolved(chapter_number: int, category: str, fact_text: str) -> bo
     if not updated:
         return False
 
-    atomic_write(CANON_MEMORY_PATH, render_canon_memory(chapters))
+    guarded_write_canon_memory(chapters)
     return True
 
 
@@ -1955,16 +1992,9 @@ def prompt_for_destructive_confirmation() -> bool:
 
 def create_canon_memory_backup() -> None:
     """Create a timestamped canon memory backup before rebuild operations."""
-    BACKUPS_DIR.mkdir(parents=True, exist_ok=True)
-    backup_timestamp = datetime.utcnow().strftime("%Y%m%d_%H%M%S")
-    backup_path = BACKUPS_DIR / f"canon_memory_backup_{backup_timestamp}.txt"
-    backup_content = (
-        CANON_MEMORY_PATH.read_text(encoding="utf-8")
-        if CANON_MEMORY_PATH.exists()
-        else ""
-    )
-    atomic_write(backup_path, backup_content)
+    backup_path = create_canon_memory_guard_backup()
     print("Canon memory backup created.")
+    print(f"Backup path: {backup_path}")
 
 
 
@@ -2253,7 +2283,7 @@ def apply_resolutions(selected_labels: list[str], chapter_number: int | None = N
 
     if resolved_count > 0:
         chapters = consolidate_story_states(chapters)
-        atomic_write(CANON_MEMORY_PATH, render_canon_memory(chapters))
+        guarded_write_canon_memory(chapters)
 
     return resolved_count
 
@@ -2291,7 +2321,7 @@ def apply_story_state_updates(
 
     if activations_applied > 0 or resolutions_applied > 0:
         chapters = consolidate_story_states(chapters)
-        atomic_write(CANON_MEMORY_PATH, render_canon_memory(chapters))
+        guarded_write_canon_memory(chapters)
 
     return activations_applied, resolutions_applied
 
@@ -3273,10 +3303,7 @@ def handle_rebuild_memory(client: Any, command_text: str = "") -> None:
         rebuilt_chapters = consolidate_story_states(rebuilt_chapters)
 
         try:
-            atomic_write(
-                CANON_MEMORY_PATH,
-                render_canon_memory(rebuilt_chapters),
-            )
+            guarded_write_canon_memory(rebuilt_chapters)
             log_path = write_rebuild_log(
                 mode="FULL",
                 lines=[
@@ -3334,7 +3361,7 @@ def handle_rebuild_memory(client: Any, command_text: str = "") -> None:
         chapters = consolidate_story_states(chapters)
 
         try:
-            atomic_write(CANON_MEMORY_PATH, render_canon_memory(chapters))
+            guarded_write_canon_memory(chapters)
             log_path = write_rebuild_log(
                 mode="SINGLE",
                 lines=[
