@@ -51,6 +51,7 @@ PROOFREAD_TEMPERATURE = 0.1
 IDEA_RESURFACE_TEMPERATURE = 0.3
 DRAFT_PASS_TEMPERATURE = 0.2
 RESEARCH_TEMPERATURE = 0.0
+RESEARCH_SCENE_TEMPERATURE = 0.0
 
 CONTINUITY_CHAPTER_WINDOW = 3
 MAX_SCENE_SUMMARIES = 5
@@ -63,6 +64,27 @@ Use the provided memory carefully and naturally.
 Be creative, clear, and practical.
 Do not invent persistent facts unless the user states them.
 """
+
+RESEARCH_SCENE_SYSTEM_PROMPT = """You are a hard-science realism consultant.
+
+You must analyse:
+
+- physics accuracy
+- engineering feasibility
+- environmental realism
+- energy requirements
+- scale realism
+- survivability factors
+- technological plausibility
+
+You must NOT:
+
+- write story prose
+- suggest narrative changes
+- judge writing quality
+- invent fictional science unless clearly labelled theoretical
+
+Be factual, structured and concise."""
 
 RESEARCH_DEPTH_OPTIONS: dict[str, str] = {
     "1": "Surface realism",
@@ -2112,6 +2134,45 @@ def build_research_messages(
     ]
 
 
+def build_research_scene_messages(
+    scene_chunk: str,
+    canon_memory_block: str,
+    world_rules_block: str,
+    prior_findings: str = "",
+) -> list[dict[str, str]]:
+    """Build isolated hard-sci-fi realism analysis messages for a scene chunk."""
+    prior_findings_block = prior_findings if prior_findings.strip() else "(none)"
+    return [
+        {"role": "system", "content": RESEARCH_SCENE_SYSTEM_PROMPT},
+        {
+            "role": "user",
+            "content": (
+                "Analyse this scene chunk for scientific realism only.\n"
+                "Do not rewrite, do not suggest plot/dialogue/prose, and do not provide narrative critique.\n"
+                "Use canon memory and world rules only as factual context constraints.\n\n"
+                "Output format (strict):\n"
+                "SCIENCE REALISM REPORT\n\n"
+                "Relevant Real Science\n"
+                "- bullet points\n\n"
+                "Realistic Constraints\n"
+                "- bullet points\n\n"
+                "Already Realistic Elements\n"
+                "- bullet points\n\n"
+                "Unrealistic or Risky Elements\n"
+                "- bullet points\n\n"
+                "Scientific Detail Opportunities\n"
+                "- micro realism ideas\n"
+                "- instrumentation behaviour\n"
+                "- environmental reactions\n\n"
+                f"Prior findings from earlier chunks:\n{prior_findings_block}\n\n"
+                f"Canon memory:\n{canon_memory_block}\n\n"
+                f"World rules:\n{world_rules_block}\n\n"
+                f"Scene chunk:\n{scene_chunk}"
+            ),
+        },
+    ]
+
+
 # ============================================================
 # Extraction helpers
 # ============================================================
@@ -3624,6 +3685,93 @@ def handle_research_topic(client: Any) -> None:
     print("Research topic saved.")
 
 
+def handle_research_scene(client: Any) -> None:
+    """Run chunk-safe hard-science realism analysis on pasted scene text."""
+    print("Paste scene text. Type END on new line when finished.")
+    scene_text = collect_multiline_input(end_marker="END")
+    if not scene_text:
+        print("No scene provided.")
+        return
+
+    scene_chunks = chunk_text_blocks([scene_text], max_chars=10000)
+    if not scene_chunks:
+        print("No scene provided.")
+        return
+
+    canon_memory_block = (
+        read_text_file(CANON_MEMORY_PATH)
+        if CANON_MEMORY_PATH.exists()
+        else "(not provided)"
+    )
+    world_rules_block = (
+        read_text_file(WORLD_RULES_PATH)
+        if WORLD_RULES_PATH.exists()
+        else "(not provided)"
+    )
+
+    try:
+        chunk_reports: list[str] = []
+        prior_findings = ""
+        for chunk_index, scene_chunk in enumerate(scene_chunks, start=1):
+            if len(scene_chunks) > 1:
+                print(f"Analyzing chunk {chunk_index}/{len(scene_chunks)}...")
+            chunk_report = request_chat_completion(
+                client=client,
+                messages=build_research_scene_messages(
+                    scene_chunk=scene_chunk,
+                    canon_memory_block=canon_memory_block,
+                    world_rules_block=world_rules_block,
+                    prior_findings=prior_findings,
+                ),
+                temperature=RESEARCH_SCENE_TEMPERATURE,
+            )
+            chunk_reports.append(chunk_report)
+            prior_findings = "\n\n".join(chunk_reports[-2:])
+
+        if len(chunk_reports) == 1:
+            final_report = chunk_reports[0]
+        else:
+            final_report = request_chat_completion(
+                client=client,
+                messages=[
+                    {"role": "system", "content": RESEARCH_SCENE_SYSTEM_PROMPT},
+                    {
+                        "role": "user",
+                        "content": (
+                            "Merge these chunk-level scientific realism analyses into one final report.\n"
+                            "Keep the exact output structure below. Remove duplicates. Preserve concrete findings.\n"
+                            "Do not add prose rewrites, story suggestions, or narrative critique.\n\n"
+                            "Output format (strict):\n"
+                            "SCIENCE REALISM REPORT\n\n"
+                            "Relevant Real Science\n"
+                            "- bullet points\n\n"
+                            "Realistic Constraints\n"
+                            "- bullet points\n\n"
+                            "Already Realistic Elements\n"
+                            "- bullet points\n\n"
+                            "Unrealistic or Risky Elements\n"
+                            "- bullet points\n\n"
+                            "Scientific Detail Opportunities\n"
+                            "- micro realism ideas\n"
+                            "- instrumentation behaviour\n"
+                            "- environmental reactions\n\n"
+                            + "\n\n".join(
+                                f"Chunk {index} report:\n{chunk_report}"
+                                for index, chunk_report in enumerate(chunk_reports, start=1)
+                            )
+                        ),
+                    },
+                ],
+                temperature=RESEARCH_SCENE_TEMPERATURE,
+            )
+    except Exception as exc:  # Keep terminal app stable for the user.
+        print(f"Research scene analysis failed: {exc}")
+        return
+
+    print()
+    print(final_report)
+
+
 def handle_world_add() -> None:
     """Capture and save one structured world rule entry."""
     print("Enter world rule category:")
@@ -3837,6 +3985,7 @@ def print_help() -> None:
     print("/scene-summary")
     print("/proofread")
     print("/research-topic")
+    print("/research-scene   → hard-science realism analysis for pasted scene")
     print()
     print("MEMORY")
     print("/rebuild-memory")
@@ -3895,6 +4044,7 @@ def main() -> None:
         "/book-integrity": lambda command_text="": handle_book_integrity(client),
         "/proofread": lambda command_text="": handle_proofread(client),
         "/research-topic": lambda command_text="": handle_research_topic(client),
+        "/research-scene": lambda command_text="": handle_research_scene(client),
         "/idea-resurface": lambda command_text="": handle_idea_resurface(client),
         "/draft-pass": lambda command_text="": handle_draft_pass(client, command_text),
         "/build-book": lambda command_text="": handle_build_book(),
