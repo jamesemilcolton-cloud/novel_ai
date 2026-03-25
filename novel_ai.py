@@ -5509,6 +5509,14 @@ Canon memory impact: None.
 Manuscript impact: No source text changes; generates export artifact.
 Safety level: Modifies data.
 When to use: When preparing editor/agent/beta-reader distribution output.""",
+    "/system --tree": """Purpose: Display canonical project directory structure and directory purposes.
+Files read: Path constants from runtime configuration only.
+Files written: None.
+AI usage: No.
+Canon memory impact: None.
+Manuscript impact: None.
+Safety level: Safe.
+When to use: For orientation, audits, onboarding, or filesystem sanity checks.""",
     "/world-consistency": """Purpose: Audit whole-book world-logic consistency in chunks and synthesize issues.
 Files read: Full manuscript/book text.
 Files written: World consistency report file.
@@ -6122,6 +6130,91 @@ def handle_export_book(command_text: str = "") -> None:
     print("Unsupported export option. Use /export-book --docx")
 
 
+def command_system_tree() -> None:
+    """Display the canonical project directory tree and folder purposes."""
+    print("=== NOVEL AI SYSTEM STRUCTURE ===")
+    print()
+
+    tree_lines = [
+        f"{WRITING_DIR.name}/",
+        f"└── {NOVEL_PROJECT_DIR.name}/",
+        f"    ├── {CHAPTERS_DIR.name}/",
+        f"    ├── {MANUSCRIPT_DIR.name}/",
+        f"    ├── {DRAFTS_DIR.name}/",
+        "    ├── autosaves/",
+        f"    ├── {PROJECT_MEMORY_DIR.name}/",
+        f"    │   └── {CANON_MEMORY_BACKUPS_DIR.name}/",
+        f"    ├── {PROJECT_ANALYSIS_DIR.name}/",
+        f"    │   ├── {CONTINUITY_REPORTS_DIR.name}/",
+        f"    │   ├── {TIMELINE_LOGS_DIR.name}/",
+        f"    │   ├── {BOOK_INTEGRITY_REPORTS_DIR.name}/",
+        f"    │   └── {REBUILD_LOG_DIR.name}/",
+        f"    ├── {RESEARCH_DIR.name}/",
+        f"    │   └── {RESEARCH_INTEGRITY_REPORTS_DIR.name}/",
+        f"    ├── {FULL_NOVEL_PROCESSOR_LOG_DIR.name}/",
+        f"    ├── {PROJECT_BACKUPS_DIR.name}/",
+        "    └── sources/",
+    ]
+    for line in tree_lines:
+        print(line)
+
+    print()
+    print("=== DIRECTORY PURPOSE ===")
+    print()
+
+    directory_descriptions = OrderedDict(
+        [
+            ("chapters/", "Stores finalized individual chapter files."),
+            ("manuscript/", "Stores compiled full novel manuscript outputs."),
+            ("drafts/", "Creative workspace for experimental or unfinished writing."),
+            (
+                "autosaves/",
+                "Automatic safety saves created during writing or processor activity.",
+            ),
+            ("memory/", "Persistent AI canon memory (characters, world, plot state)."),
+            ("memory/backups/", "Safety snapshots of AI memory before modification."),
+            (
+                "analysis/",
+                "Outputs from timeline engines, continuity scanners and rebuild systems.",
+            ),
+            ("analysis/continuity_reports/", "Canon contradiction detection reports."),
+            ("analysis/timeline_logs/", "Chronological tracking of story events."),
+            (
+                "analysis/book_integrity_reports/",
+                "Structural manuscript health reports.",
+            ),
+            (
+                "analysis/rebuild_logs/",
+                "Logs from rebuild engines altering novel structure.",
+            ),
+            ("research/", "Worldbuilding and factual research storage."),
+            (
+                "research/integrity_reports/",
+                "Reports checking research consistency with canon.",
+            ),
+            (
+                "logs/",
+                "System execution logs for processor runs and major operations.",
+            ),
+            (
+                "backups/",
+                "Full project restore snapshots for disaster recovery.",
+            ),
+            ("sources/", "Imported external text or screenplay material."),
+        ]
+    )
+    for directory_name, description in directory_descriptions.items():
+        print(f"{directory_name}\n  {description}")
+
+
+def handle_system(command_text: str = "") -> None:
+    """Route /system options to concrete system handlers."""
+    if "--tree" in command_text:
+        command_system_tree()
+        return
+    print("Unsupported system option. Use /system --tree")
+
+
 
 def main() -> None:
     """Run the terminal assistant."""
@@ -6164,6 +6257,8 @@ def main() -> None:
         "/timeline-view": lambda command_text="": handle_timeline_view(),
         "/story-state": lambda command_text="": handle_story_state(),
         "/export-chapter": lambda command_text="": handle_export_chapter(),
+        "/system --tree": handle_system,
+        "/system": handle_system,
         "/export-book": handle_export_book,
         "/export-book --docx": handle_export_book,
         "/novel-stats": lambda command_text="": handle_novel_stats(),
