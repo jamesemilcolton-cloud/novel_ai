@@ -3,6 +3,8 @@ from __future__ import annotations
 import os
 import re
 import inspect
+import math
+import shutil
 from collections import Counter, OrderedDict
 from copy import deepcopy
 from datetime import datetime, timedelta
@@ -5746,12 +5748,134 @@ def rebuild_help_descriptions() -> None:
         COMMAND_HELP[command_name] = _generate_system_introspection_help(command_func)
 
 
+HELP_SECTION_ORDER: tuple[str, ...] = (
+    "Session Control",
+    "System & Diagnostics",
+    "Writing & Drafting",
+    "Book & Chapter Tools",
+    "Continuity & Integrity",
+    "Memory & Rebuild",
+    "Research & Worldbuilding",
+    "Ideas & Creativity",
+    "Help & Workflow",
+    "Other Commands",
+)
+
+
+def _command_root(command_name: str) -> str:
+    """Extract root token from command signature."""
+    return command_name.split()[0]
+
+
+def _categorize_command(command_name: str) -> str:
+    """Map command into a help-display section."""
+    root = _command_root(command_name)
+
+    if root == "exit":
+        return "Session Control"
+
+    if root in {
+        "/system",
+        "/novel-stats",
+        "/story-state",
+    } or command_name == "/help --system-health":
+        return "System & Diagnostics"
+
+    if root in {
+        "/draft-save",
+        "/draft-load",
+        "/draft-pass",
+        "/draft-list",
+        "/drafts",
+        "/restore-draft",
+    }:
+        return "Writing & Drafting"
+
+    if root in {
+        "/build-book",
+        "/export-book",
+        "/export-chapter",
+        "/chapter-summary",
+        "/scene-summary",
+        "/recap",
+        "/proofread",
+    }:
+        return "Book & Chapter Tools"
+
+    if root in {
+        "/continuity-check",
+        "/book-integrity",
+        "/character-consistency",
+        "/world-consistency",
+        "/timeline-view",
+    }:
+        return "Continuity & Integrity"
+
+    if root in {
+        "/rebuild-memory",
+        "/rebuild-summaries",
+    }:
+        return "Memory & Rebuild"
+
+    if root in {
+        "/research-topic",
+        "/research-scene",
+        "/research-apply",
+        "/research-integrity",
+        "/world-add",
+    }:
+        return "Research & Worldbuilding"
+
+    if root in {
+        "/ideas",
+        "/idea-resurface",
+    }:
+        return "Ideas & Creativity"
+
+    if root == "/help":
+        return "Help & Workflow"
+
+    return "Other Commands"
+
+
+def _print_columns(items: list[str], width: int) -> None:
+    """Print items in terminal-width-aware columns."""
+    if not items:
+        return
+
+    col_width = 28
+    num_cols = max(1, width // col_width)
+    rows = math.ceil(len(items) / num_cols)
+
+    for row_index in range(rows):
+        line = ""
+        for col_index in range(num_cols):
+            item_index = col_index * rows + row_index
+            if item_index < len(items):
+                line += items[item_index].ljust(col_width)
+        print(line.rstrip())
+
+
 def print_help() -> None:
     """Show available commands."""
-    print("Available commands:")
-    for command_name in ALL_COMMANDS:
-        print(command_name)
-    print("exit")
+    terminal_width = shutil.get_terminal_size().columns
+    discovered_commands = sorted(set(ALL_COMMANDS + ["exit"]), key=lambda item: (item.split()[0], item))
+
+    sectioned_commands: OrderedDict[str, list[str]] = OrderedDict(
+        (section_title, []) for section_title in HELP_SECTION_ORDER
+    )
+
+    for command_name in discovered_commands:
+        sectioned_commands[_categorize_command(command_name)].append(command_name)
+
+    print("=== NOVEL AI COMMANDS ===")
+    print()
+    for section_title, commands in sectioned_commands.items():
+        if not commands:
+            continue
+        print(f"[ {section_title} ]")
+        _print_columns(sorted(commands), terminal_width)
+        print()
 
 
 def update_help_commands_from_handlers(command_handlers: dict[str, Callable[[str], None]]) -> None:
