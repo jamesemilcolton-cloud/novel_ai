@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import os
 import re
+import inspect
 from collections import Counter, OrderedDict
 from copy import deepcopy
 from datetime import datetime, timedelta
@@ -5509,22 +5510,6 @@ Canon memory impact: None.
 Manuscript impact: No source text changes; generates export artifact.
 Safety level: Modifies data.
 When to use: When preparing editor/agent/beta-reader distribution output.""",
-    "/system --tree": """Purpose: Display canonical project directory structure and directory purposes.
-Files read: Path constants from runtime configuration only.
-Files written: None.
-AI usage: No.
-Canon memory impact: None.
-Manuscript impact: None.
-Safety level: Safe.
-When to use: For orientation, audits, onboarding, or filesystem sanity checks.""",
-    "/system --map": """Purpose: Display a logical architecture map of command read/write relationships by directory.
-Files read: Static in-code architecture metadata only.
-Files written: None.
-AI usage: No.
-Canon memory impact: None.
-Manuscript impact: None.
-Safety level: Safe.
-When to use: For debugging command behavior and understanding system data flow.""",
     "/world-consistency": """Purpose: Audit whole-book world-logic consistency in chunks and synthesize issues.
 Files read: Full manuscript/book text.
 Files written: World consistency report file.
@@ -5662,6 +5647,103 @@ def handle_help_describe() -> None:
     print()
     print(selected_command)
     print(description)
+
+
+def _extract_help_generation_signals(command_func: Callable[..., Any]) -> dict[str, Any]:
+    """Collect behavior signals from command function source for description generation."""
+    source = inspect.getsource(command_func)
+    source_lower = source.lower()
+
+    printed_headers = re.findall(r'print\((?:"|\')([^"\']+)(?:"|\')\)', source)
+    header_markers = [header for header in printed_headers if "===" in header or "DIRECTORY" in header.upper()]
+
+    directory_constant_refs = sorted(set(re.findall(r"\b[A-Z_]+_DIR\b", source)))
+    literal_directory_refs = sorted(
+        set(
+            match
+            for match in re.findall(r'(?:"|\')([a-zA-Z0-9_/\-]+/)(?:"|\')', source)
+            if "/" in match
+        )
+    )
+
+    architecture_terms = sorted(
+        {
+            term
+            for term in ("architecture", "map", "reads", "writes", "debug", "onboarding", "data flow")
+            if term in source_lower
+        }
+    )
+
+    return {
+        "function_name": command_func.__name__,
+        "headers": header_markers,
+        "directory_constants": directory_constant_refs,
+        "literal_directories": literal_directory_refs,
+        "architecture_terms": architecture_terms,
+    }
+
+
+def _generate_system_introspection_help(command_func: Callable[..., Any]) -> str:
+    """Generate static help text for system introspection commands from function behavior."""
+    signals = _extract_help_generation_signals(command_func)
+    function_name = signals["function_name"]
+
+    emits_tree_output = "tree" in function_name or "tree_lines" in inspect.getsource(command_func)
+    emits_architecture_map = "map" in function_name or "architecture" in " ".join(signals["architecture_terms"])
+
+    discovered_directories = signals["directory_constants"] + signals["literal_directories"]
+    directory_scope = "multiple project directories" if discovered_directories else "project paths when available"
+
+    header_phrase = ""
+    if signals["headers"]:
+        cleaned_headers = ", ".join(header.strip("= ").lower() for header in signals["headers"][:2])
+        header_phrase = f" based on printed sections such as {cleaned_headers}"
+
+    if emits_tree_output:
+        purpose = (
+            "Display the project directory tree and explain the role of each directory"
+            f"{header_phrase}."
+        )
+        when_to_use = "For architecture transparency, onboarding, and filesystem debugging."
+    elif emits_architecture_map:
+        purpose = (
+            "Display the logical architecture map of command interactions with project directories"
+            f"{header_phrase}."
+        )
+        when_to_use = "For pipeline debugging and system behavior visualization."
+    else:
+        purpose = f"Display system introspection output derived from {function_name}{header_phrase}."
+        when_to_use = "For developer introspection and operational debugging."
+
+    files_read = (
+        f"Function source-defined metadata for {directory_scope}."
+        if discovered_directories
+        else "Function source-defined metadata only."
+    )
+
+    return "\n".join(
+        [
+            f"Purpose: {purpose}",
+            "Command category: System Introspection.",
+            f"Files read: {files_read}",
+            "Files written: None.",
+            "AI usage: No.",
+            "Canon memory impact: None.",
+            "Manuscript impact: None.",
+            "Safety level: Safe.",
+            f"When to use: {when_to_use}",
+        ]
+    )
+
+
+AVAILABLE_COMMAND_FUNCTIONS: list[Callable[..., Any]] = []
+HELP_COMMAND_DISCOVERY: OrderedDict[str, Callable[..., Any]] = OrderedDict()
+
+
+def rebuild_help_descriptions() -> None:
+    """Rebuild generated static help descriptions from discovered command functions."""
+    for command_name, command_func in HELP_COMMAND_DISCOVERY.items():
+        COMMAND_HELP[command_name] = _generate_system_introspection_help(command_func)
 
 
 def print_help() -> None:
@@ -6312,6 +6394,12 @@ def command_system_map() -> None:
             print()
 
 
+AVAILABLE_COMMAND_FUNCTIONS.append(command_system_tree)
+AVAILABLE_COMMAND_FUNCTIONS.append(command_system_map)
+HELP_COMMAND_DISCOVERY["/system --tree"] = command_system_tree
+HELP_COMMAND_DISCOVERY["/system --map"] = command_system_map
+
+
 def handle_system(command_text: str = "") -> None:
     """Route /system options to concrete system handlers."""
     if "--map" in command_text:
@@ -6378,6 +6466,7 @@ def main() -> None:
         "/help": lambda command_text="": print_help(),
     }
     update_help_commands_from_handlers(command_handlers)
+    rebuild_help_descriptions()
 
     print_welcome()
 
