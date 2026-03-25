@@ -4326,8 +4326,317 @@ def print_help() -> None:
     print()
     print("SYSTEM")
     print("/novel-stats")
+    print("/help --when")
     print("/help")
     print("exit")
+
+
+def handle_help_when() -> None:
+    """Show static command usage workflow guidance."""
+    print(
+        """==================================================
+NOVEL AI — COMMAND USAGE GUIDE
+
+CORE WRITING PRINCIPLE
+
+Write freely first.
+Use AI AFTER writing to stabilise story logic and memory.
+
+---
+
+AFTER A WRITING SESSION
+
+/proofread
+
+Use to fix:
+
+- grammar
+- punctuation
+- vocabulary clarity
+
+Does NOT change story meaning.
+
+---
+
+AFTER WRITING AN IMPORTANT SCENE
+
+/scene-summary
+
+Use when:
+
+- major event occurs
+- new world rule appears
+- emotional turning point happens
+- character relationship shifts
+- mission situation changes
+
+Purpose:
+
+- extract canon facts
+- update story-state tracking
+- maintain continuity memory.
+
+---
+
+BEFORE MOVING TO NEXT CHAPTER
+
+/continuity-check
+
+Use when:
+
+- finishing a chapter
+- unsure timeline still makes sense
+- risk of injury/location/world contradictions.
+
+Prevents narrative errors early.
+
+---
+
+WHEN STORY DIRECTION FEELS UNCLEAR
+
+/context-snapshot
+
+Use to:
+
+- quickly remember current story situation
+- understand emotional tone
+- recall active threads.
+
+---
+
+WHEN STORY FEELS STUCK
+
+/idea-resurface
+
+Use to:
+
+- rediscover stored ideas relevant to current story direction.
+
+---
+
+WHEN WORLD RULES BECOME CONFIRMED
+
+/world-add
+
+Use to permanently lock:
+
+- technology limits
+- tone realism
+- political or social systems.
+
+---
+
+AFTER MAJOR REWRITES
+
+/rebuild-memory
+
+Use when:
+
+- chapter heavily rewritten
+- character motivations changed
+- structural edits made.
+
+Options:
+
+- rebuild single chapter
+- rebuild full novel.
+
+---
+
+WHEN REVIEWING STORY PROGRESS
+
+/story-state
+
+Use to view:
+
+- active arcs
+- unresolved tensions
+- narrative pressure.
+
+---
+
+WHEN CHECKING EVENT ORDER
+
+/timeline-view
+
+Use when:
+
+- events feel out of sequence
+- mission timeline unclear
+- long time gaps exist.
+
+---
+
+WHEN REVIEWING A CHAPTER STRUCTURALLY
+
+/chapter-summary
+
+Use when:
+
+- chapter draft complete
+- preparing rewrite
+- checking pacing movement.
+
+---
+
+WHEN CHECKING SCI-FI WORLD LOGIC
+
+/world-consistency
+
+Audits full novel for:
+
+- technology realism
+- environmental plausibility
+- scale drift.
+
+---
+
+WHEN CHECKING CHARACTER BEHAVIOUR LOGIC
+
+/character-consistency
+
+Audits full novel for:
+
+- personality drift
+- motivation contradictions
+- psychological realism breaks.
+
+---
+
+WHEN PERFORMING FOCUSED REVISION ANALYSIS
+
+/draft-pass
+
+Use when:
+
+- pacing weak
+- character unclear
+- tension low
+- clarity issues.
+
+---
+
+WHEN SAVING SAFE MANUSCRIPT SNAPSHOTS
+
+/draft-save
+
+Creates recoverable draft version.
+
+---
+
+WHEN VIEWING AVAILABLE DRAFTS
+
+/draft-list
+
+Shows stored manuscript versions.
+
+---
+
+WHEN RESTORING OLD VERSION
+
+/draft-load
+
+Rolls manuscript back to previous snapshot.
+
+---
+
+WHEN CHECKING WHOLE BOOK HEALTH
+
+/book-integrity
+
+Use when:
+
+- halfway through novel
+- finishing major arc
+- preparing for beta readers.
+
+---
+
+WHEN BUILDING FULL MANUSCRIPT
+
+/build-book
+
+Combines all chapters into single readable document.
+
+---
+
+WHEN EXPORTING PROFESSIONAL MANUSCRIPT
+
+/export-book --docx
+
+Use when:
+
+- sending to agents
+- sending to editors
+- beta reader distribution.
+
+---
+
+WHEN STORING RAW IDEAS
+
+/ideas
+
+Use anytime inspiration occurs.
+
+---
+
+WHEN PERFORMING SCIENTIFIC REALISM RESEARCH
+
+/research-topic
+
+Pure scientific research engine.
+
+---
+
+WHEN TESTING SCIENCE REALISM IN A SCENE
+
+/research-scene
+
+Hard-sci-fi realism advisor.
+
+---
+
+WHEN APPLYING SAVED SCIENCE TO A SCENE
+
+/research-apply
+
+Detect realism conflicts.
+
+---
+
+WHEN CHECKING SCIENCE CONSISTENCY ACROSS RESEARCH
+
+/research-integrity
+
+Audits all research topics for contradictions.
+
+---
+
+WHEN CHECKING SYSTEM HEALTH
+
+/help --system-health
+
+Diagnoses:
+
+- manuscript size risks
+- canon memory state
+- draft safety
+- performance risks.
+
+---
+
+GOLDEN WRITING RHYTHM
+
+WRITE
+→ PROOFREAD
+→ SCENE SUMMARY
+→ CONTINUITY CHECK
+→ CONTINUE WRITING
+
+Strategic commands used only when necessary.
+
+=================================================="""
+    )
 
 
 def handle_export_book(command_text: str = "") -> None:
@@ -4379,6 +4688,7 @@ def main() -> None:
         "/export-chapter": lambda command_text="": handle_export_chapter(),
         "/export-book": handle_export_book,
         "/novel-stats": lambda command_text="": handle_novel_stats(),
+        "/help --when": lambda command_text="": handle_help_when(),
         "/help": lambda command_text="": print_help(),
     }
 
