@@ -88,6 +88,57 @@ You must NOT:
 
 Be factual, structured and concise."""
 
+WORLD_CONSISTENCY_CHUNK_SYSTEM_PROMPT = """You are a strict science-fiction world logic auditor.
+
+Analyse ONLY for factual world consistency problems.
+
+Focus on:
+technology limits,
+environment realism,
+space mechanics,
+energy logic,
+AI behavioural consistency,
+authority structures,
+tone drift,
+scale inflation.
+
+Do NOT:
+give writing advice,
+rewrite text,
+comment on prose quality.
+
+If no issue in this chunk output EXACTLY:
+
+NO WORLD ISSUES IN THIS CHUNK
+
+Otherwise output:
+
+WORLD ISSUE
+- description
+"""
+
+WORLD_CONSISTENCY_SYNTHESIS_SYSTEM_PROMPT = """You are a senior world consistency auditor.
+
+Combine all chunk findings into one final report.
+
+Remove duplicates.
+Group related problems.
+Be concise.
+
+If no issues exist output EXACTLY:
+
+WORLD CONSISTENCY REPORT
+
+World logic remains consistent.
+
+Otherwise output:
+
+WORLD CONSISTENCY REPORT
+
+- issue
+- issue
+"""
+
 RESEARCH_DEPTH_OPTIONS: dict[str, str] = {
     "1": "Surface realism",
     "2": "Hard sci-fi realism",
@@ -2692,6 +2743,130 @@ def handle_book_integrity(client: Any) -> None:
     print(f"Book integrity report saved to {report_path}.")
 
 
+def handle_world_consistency(client: Any) -> None:
+    """Run a chunk-safe full-novel sci-fi world consistency audit."""
+    ensure_project_files()
+
+    if not PROJECT_MEMORY_DIR.exists() or not PROJECT_MEMORY_DIR.is_dir():
+        print(f"Missing memory directory: {PROJECT_MEMORY_DIR}")
+        return
+
+    if not CANON_MEMORY_PATH.exists() or not CANON_MEMORY_PATH.is_file():
+        print(f"Missing canon memory file: {CANON_MEMORY_PATH}")
+        return
+
+    if not CHAPTERS_DIR.exists() or not CHAPTERS_DIR.is_dir():
+        print(f"Missing chapters directory: {CHAPTERS_DIR}")
+        return
+
+    try:
+        canon_memory = clean_terminal_text(CANON_MEMORY_PATH.read_text(encoding="utf-8")).strip()
+    except OSError as exc:
+        print(f"Could not read canon memory: {exc}")
+        return
+
+    if not canon_memory:
+        print(f"Canon memory is empty: {CANON_MEMORY_PATH}")
+        return
+
+    world_rules = "(none)"
+    if WORLD_RULES_PATH.exists() and WORLD_RULES_PATH.is_file():
+        try:
+            loaded_world_rules = clean_terminal_text(
+                WORLD_RULES_PATH.read_text(encoding="utf-8")
+            ).strip()
+        except OSError as exc:
+            print(f"Could not read world rules: {exc}")
+            return
+        if loaded_world_rules:
+            world_rules = loaded_world_rules
+
+    chapter_paths = load_sorted_chapter_paths()
+    if not chapter_paths:
+        print("No chapter files found in ~/writing/novel_project/chapters/")
+        return
+
+    chapter_blocks: list[str] = []
+    for chapter_path in chapter_paths:
+        chapter_number = extract_chapter_number(chapter_path)
+        if chapter_number is None:
+            continue
+        try:
+            chapter_text = clean_terminal_text(chapter_path.read_text(encoding="utf-8")).strip()
+        except OSError as exc:
+            print(f"Could not read {chapter_path.name}: {exc}")
+            return
+        if not chapter_text:
+            continue
+        chapter_blocks.append(f"CHAPTER {chapter_number}\n\n{chapter_text}")
+
+    if not chapter_blocks:
+        print("No chapter text found.")
+        return
+
+    chunk_blocks = chunk_text_blocks(chapter_blocks, max_chars=10000)
+    if not chunk_blocks:
+        print("No chapter text found.")
+        return
+
+    chunk_reports: list[str] = []
+    try:
+        for chunk_index, chunk_text in enumerate(chunk_blocks, start=1):
+            print(f"Analyzing chunk {chunk_index}/{len(chunk_blocks)}...")
+            chunk_report = request_chat_completion(
+                client=client,
+                messages=[
+                    {"role": "system", "content": WORLD_CONSISTENCY_CHUNK_SYSTEM_PROMPT},
+                    {
+                        "role": "user",
+                        "content": (
+                            f"Canon memory:\n\n{canon_memory}\n\n"
+                            f"World rules:\n\n{world_rules}\n\n"
+                            f"Novel chunk:\n\n{chunk_text}"
+                        ),
+                    },
+                ],
+                temperature=CONTINUITY_TEMPERATURE,
+            ).strip()
+            chunk_reports.append(chunk_report)
+    except Exception as exc:  # Keep terminal app stable for the user.
+        print(f"World consistency audit failed: {exc}")
+        return
+
+    issue_notes = [
+        report
+        for report in chunk_reports
+        if report and report.strip() != "NO WORLD ISSUES IN THIS CHUNK"
+    ]
+
+    if not issue_notes:
+        print()
+        print("WORLD CONSISTENCY REPORT")
+        print()
+        print("World logic remains consistent.")
+        return
+
+    synthesis_payload = "\n\n".join(
+        f"Chunk {index} findings:\n{report}"
+        for index, report in enumerate(issue_notes, start=1)
+    )
+    try:
+        final_report = request_chat_completion(
+            client=client,
+            messages=[
+                {"role": "system", "content": WORLD_CONSISTENCY_SYNTHESIS_SYSTEM_PROMPT},
+                {"role": "user", "content": synthesis_payload},
+            ],
+            temperature=CONTINUITY_TEMPERATURE,
+        ).strip()
+    except Exception as exc:  # Keep terminal app stable for the user.
+        print(f"World consistency synthesis failed: {exc}")
+        return
+
+    print()
+    print(final_report)
+
+
 def handle_rebuild_memory(client: Any, command_text: str = "") -> None:
     """Rebuild canon memory for the whole novel or one chapter."""
     ensure_project_files()
@@ -4602,6 +4777,7 @@ def print_help() -> None:
     print("/build-book")
     print("/export-book --docx")
     print("/book-integrity")
+    print("/world-consistency")
     print()
     print("SYSTEM")
     print("/novel-stats")
@@ -4947,6 +5123,7 @@ def main() -> None:
         "/rebuild-memory": lambda command_text="": handle_rebuild_memory(client, command_text),
         "/continuity-check": lambda command_text="": handle_continuity_check(client),
         "/book-integrity": lambda command_text="": handle_book_integrity(client),
+        "/world-consistency": lambda command_text="": handle_world_consistency(client),
         "/proofread": lambda command_text="": handle_proofread(client),
         "/research-topic": lambda command_text="": handle_research_topic(client),
         "/research-scene": lambda command_text="": handle_research_scene(client),
