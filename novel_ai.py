@@ -5517,6 +5517,14 @@ Canon memory impact: None.
 Manuscript impact: None.
 Safety level: Safe.
 When to use: For orientation, audits, onboarding, or filesystem sanity checks.""",
+    "/system --map": """Purpose: Display a logical architecture map of command read/write relationships by directory.
+Files read: Static in-code architecture metadata only.
+Files written: None.
+AI usage: No.
+Canon memory impact: None.
+Manuscript impact: None.
+Safety level: Safe.
+When to use: For debugging command behavior and understanding system data flow.""",
     "/world-consistency": """Purpose: Audit whole-book world-logic consistency in chunks and synthesize issues.
 Files read: Full manuscript/book text.
 Files written: World consistency report file.
@@ -6207,12 +6215,112 @@ def command_system_tree() -> None:
         print(f"{directory_name}\n  {description}")
 
 
+def command_system_map() -> None:
+    """Display a logical map of command read/write relationships by project directory."""
+    print("=== NOVEL AI SYSTEM ARCHITECTURE MAP ===")
+    print()
+
+    architecture_sections = [
+        (
+            "CHAPTERS DIRECTORY",
+            [
+                ("Writes", ["chapter generation commands", "draft promotion system", "rebuild chapter engine"]),
+                ("Reads", ["manuscript compiler", "timeline engine", "continuity scanner"]),
+            ],
+        ),
+        (
+            "MANUSCRIPT DIRECTORY",
+            [
+                ("Writes", ["manuscript compile command", "rebuild engine", "processor full run"]),
+                ("Reads", ["integrity scanner", "backup system", "export systems"]),
+            ],
+        ),
+        (
+            "DRAFTS DIRECTORY",
+            [
+                ("Writes", ["AI writing generation", "experimental scene builder", "processor intermediate outputs"]),
+                ("Reads", ["draft promotion system", "draft comparison tools", "tone analysis engine"]),
+            ],
+        ),
+        (
+            "AUTOSAVES DIRECTORY",
+            [
+                ("Writes", ["automatic save triggers during writing", "processor safety checkpoints"]),
+                ("Reads", ["recovery tools", "restore assistant"]),
+            ],
+        ),
+        (
+            "MEMORY DIRECTORY",
+            [
+                ("Writes", ["memory processor", "continuity repair engine", "canon update commands"]),
+                ("Reads", ["writing generation prompts", "timeline builder", "research alignment tools"]),
+            ],
+        ),
+        (
+            "MEMORY BACKUPS DIRECTORY",
+            [
+                ("Writes", ["memory update safeguard", "rebuild memory engine"]),
+                ("Reads", ["memory recovery system", "continuity rollback logic"]),
+            ],
+        ),
+        (
+            "ANALYSIS DIRECTORY",
+            [
+                ("Writes", ["timeline builder", "continuity scanner", "integrity engine", "rebuild diagnostics"]),
+                ("Reads", ["system health command", "developer inspection tools"]),
+            ],
+        ),
+        (
+            "RESEARCH DIRECTORY",
+            [
+                ("Writes", ["research ingestion commands", "worldbuilding tools"]),
+                ("Reads", ["writing prompt construction", "lore validation systems"]),
+            ],
+        ),
+        (
+            "LOGS DIRECTORY",
+            [
+                ("Writes", ["processor runs", "rebuild events", "integrity scans", "major command execution"]),
+                ("Reads", ["system health reporting", "debug tools"]),
+            ],
+        ),
+        (
+            "BACKUPS DIRECTORY",
+            [
+                ("Writes", ["backup command", "rebuild safeguard", "processor pre-operation snapshot"]),
+                ("Reads", ["restore system", "corruption recovery engine"]),
+            ],
+        ),
+        (
+            "SOURCES DIRECTORY",
+            [
+                ("Writes", ["screenplay import", "external text ingestion"]),
+                ("Reads", ["conversion engines", "writing inspiration tools"]),
+            ],
+        ),
+    ]
+
+    for index, (directory_header, relationships) in enumerate(architecture_sections):
+        print(directory_header)
+        for relationship_label, command_groups in relationships:
+            print(f"{relationship_label}:")
+            for command_group in command_groups:
+                print(f"- {command_group}")
+            print()
+        if index != len(architecture_sections) - 1:
+            print("-" * 50)
+            print()
+
+
 def handle_system(command_text: str = "") -> None:
     """Route /system options to concrete system handlers."""
+    if "--map" in command_text:
+        command_system_map()
+        return
     if "--tree" in command_text:
         command_system_tree()
         return
-    print("Unsupported system option. Use /system --tree")
+    print("Unsupported system option. Use /system --tree or /system --map")
 
 
 
@@ -6257,6 +6365,7 @@ def main() -> None:
         "/timeline-view": lambda command_text="": handle_timeline_view(),
         "/story-state": lambda command_text="": handle_story_state(),
         "/export-chapter": lambda command_text="": handle_export_chapter(),
+        "/system --map": handle_system,
         "/system --tree": handle_system,
         "/system": handle_system,
         "/export-book": handle_export_book,
