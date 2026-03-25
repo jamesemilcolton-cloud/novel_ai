@@ -27,6 +27,7 @@ REBUILD_LOG_DIR = PROJECT_ANALYSIS_DIR / "rebuild_logs"
 DRAFTS_DIR = NOVEL_PROJECT_DIR / "drafts"
 BACKUPS_DIR = NOVEL_PROJECT_DIR / "backups"
 RESEARCH_DIR = NOVEL_PROJECT_DIR / "research"
+RESEARCH_INTEGRITY_REPORTS_DIR = RESEARCH_DIR / "integrity_reports"
 CANON_MEMORY_PATH = PROJECT_MEMORY_DIR / "canon_memory.txt"
 SCENE_SUMMARIES_PATH = PROJECT_MEMORY_DIR / "scene_summaries.txt"
 IDEAS_PATH = PROJECT_MEMORY_DIR / "ideas.txt"
@@ -628,6 +629,7 @@ def ensure_project_files() -> None:
     BOOK_INTEGRITY_REPORTS_DIR.mkdir(parents=True, exist_ok=True)
     REBUILD_LOG_DIR.mkdir(parents=True, exist_ok=True)
     RESEARCH_DIR.mkdir(parents=True, exist_ok=True)
+    RESEARCH_INTEGRITY_REPORTS_DIR.mkdir(parents=True, exist_ok=True)
     CANON_MEMORY_PATH.touch(exist_ok=True)
     SCENE_SUMMARIES_PATH.touch(exist_ok=True)
     IDEAS_PATH.touch(exist_ok=True)
@@ -2209,6 +2211,53 @@ def build_research_apply_messages(
             "role": "user",
             "content": f"Research notes:\n{research_notes}\n\nScene text:\n{scene_text}",
         },
+    ]
+
+
+def build_research_integrity_messages(research_corpus: str) -> list[dict[str, str]]:
+    """Build an isolated prompt for auditing scientific consistency across saved research topics."""
+    system_prompt = (
+        "You are a scientific realism auditor.\n\n"
+        "Your task:\n"
+        "- Analyse all provided research notes.\n"
+        "- Detect contradictions in:\n"
+        "  - physics\n"
+        "  - astronomy\n"
+        "  - engineering feasibility\n"
+        "  - biology / survivability\n"
+        "  - environmental realism\n"
+        "  - time scales\n"
+        "  - energy requirements\n"
+        "  - technological assumptions\n"
+        "  - cause and effect realism\n\n"
+        "Rules:\n"
+        "- Do NOT provide writing advice.\n"
+        "- Do NOT suggest plot ideas.\n"
+        "- Do NOT connect analysis to any story.\n"
+        "- Do NOT speculate unless clearly labelling \"theoretical physics\".\n"
+        "- Focus only on real scientific plausibility.\n\n"
+        "Output must follow exactly one of these formats:\n\n"
+        "RESEARCH INTEGRITY REPORT\n\n"
+        "Scientific contradictions:\n\n"
+        "- item\n"
+        "- item\n\n"
+        "Scale or timeframe risks:\n\n"
+        "- item\n"
+        "- item\n\n"
+        "Engineering feasibility risks:\n\n"
+        "- item\n"
+        "- item\n\n"
+        "Unclear assumptions:\n\n"
+        "- item\n"
+        "- item\n\n"
+        "OR, if no issues exist:\n\n"
+        "RESEARCH INTEGRITY REPORT\n\n"
+        "No scientific contradictions detected."
+    )
+
+    return [
+        {"role": "system", "content": system_prompt},
+        {"role": "user", "content": f"Research notes corpus:\n{research_corpus}"},
     ]
 
 
@@ -3894,6 +3943,65 @@ def handle_research_apply(client: Any) -> None:
     print(report)
 
 
+def handle_research_integrity(client: Any) -> None:
+    """Audit all saved research topics for scientific consistency issues only."""
+    RESEARCH_DIR.mkdir(parents=True, exist_ok=True)
+    RESEARCH_INTEGRITY_REPORTS_DIR.mkdir(parents=True, exist_ok=True)
+
+    topic_files = sorted(
+        path
+        for path in RESEARCH_DIR.iterdir()
+        if path.is_file() and path.suffix.lower() == ".txt"
+    )
+    if not topic_files:
+        print("No research topics found.")
+        return
+
+    corpus_parts: list[str] = []
+    for topic_path in topic_files:
+        topic_text = clean_terminal_text(topic_path.read_text(encoding="utf-8"))
+        if not topic_text:
+            continue
+        corpus_parts.append(f"FILE: {topic_path.name}\n{topic_text}")
+
+    if not corpus_parts:
+        print("No research topics found.")
+        return
+
+    research_corpus = ("\n\n" + ("-" * 60) + "\n\n").join(corpus_parts)
+
+    try:
+        report = request_chat_completion(
+            client=client,
+            messages=build_research_integrity_messages(research_corpus),
+            temperature=RESEARCH_TEMPERATURE,
+        )
+    except Exception as exc:  # Keep terminal app stable for the user.
+        print(f"Research integrity audit failed: {exc}")
+        return
+
+    print()
+    print(report)
+
+    if not prompt_for_confirmation("Save integrity report? (y/n)"):
+        return
+
+    timestamp = datetime.utcnow().strftime("%Y%m%d_%H%M")
+    output_path = RESEARCH_INTEGRITY_REPORTS_DIR / f"integrity_{timestamp}.txt"
+    suffix = 1
+    while output_path.exists():
+        output_path = RESEARCH_INTEGRITY_REPORTS_DIR / f"integrity_{timestamp}_{suffix}.txt"
+        suffix += 1
+
+    try:
+        atomic_write(output_path, report)
+    except OSError as exc:
+        print(f"Could not save integrity report: {exc}")
+        return
+
+    print("Research integrity report saved.")
+
+
 def handle_world_add() -> None:
     """Capture and save one structured world rule entry."""
     print("Enter world rule category:")
@@ -4109,6 +4217,7 @@ def print_help() -> None:
     print("/research-topic")
     print("/research-scene   → hard-science realism analysis for pasted scene")
     print("/research-apply   → apply saved research topic as realism auditor")
+    print("/research-integrity")
     print()
     print("MEMORY")
     print("/rebuild-memory")
@@ -4169,6 +4278,7 @@ def main() -> None:
         "/research-topic": lambda command_text="": handle_research_topic(client),
         "/research-scene": lambda command_text="": handle_research_scene(client),
         "/research-apply": lambda command_text="": handle_research_apply(client),
+        "/research-integrity": lambda command_text="": handle_research_integrity(client),
         "/idea-resurface": lambda command_text="": handle_idea_resurface(client),
         "/draft-pass": lambda command_text="": handle_draft_pass(client, command_text),
         "/build-book": lambda command_text="": handle_build_book(),
