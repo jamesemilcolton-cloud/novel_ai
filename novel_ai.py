@@ -5592,7 +5592,7 @@ Canon memory impact: None.
 Manuscript impact: None.
 Safety level: Safe.
 When to use: When deciding which command fits current writing situation.""",
-    "/help --system-health": """Purpose: Display local project health diagnostics and risk signals.
+    "/system --health": """Purpose: Display local project health diagnostics and risk signals.
 Files read: Core project files/directories and memory/manuscript metadata.
 Files written: None.
 AI usage: No.
@@ -5749,93 +5749,95 @@ def rebuild_help_descriptions() -> None:
 
 
 HELP_SECTION_ORDER: tuple[str, ...] = (
-    "Session Control",
-    "System & Diagnostics",
-    "Writing & Drafting",
-    "Book & Chapter Tools",
+    "System",
+    "Exports",
+    "Drafting",
+    "Writing",
     "Continuity & Integrity",
-    "Memory & Rebuild",
-    "Research & Worldbuilding",
-    "Ideas & Creativity",
+    "World",
     "Help & Workflow",
-    "Other Commands",
 )
 
 
-def _command_root(command_name: str) -> str:
-    """Extract root token from command signature."""
-    return command_name.split()[0]
-
-
-def _categorize_command(command_name: str) -> str:
-    """Map command into a help-display section."""
-    root = _command_root(command_name)
-
-    if root == "exit":
-        return "Session Control"
-
-    if root in {
-        "/system",
-        "/novel-stats",
-        "/story-state",
-    } or command_name == "/help --system-health":
-        return "System & Diagnostics"
-
-    if root in {
-        "/draft-save",
-        "/draft-load",
-        "/draft-pass",
-        "/draft-list",
-        "/drafts",
-        "/restore-draft",
-    }:
-        return "Writing & Drafting"
-
-    if root in {
-        "/build-book",
-        "/export-book",
-        "/export-chapter",
-        "/chapter-summary",
-        "/scene-summary",
-        "/recap",
-        "/proofread",
-    }:
-        return "Book & Chapter Tools"
-
-    if root in {
-        "/continuity-check",
-        "/book-integrity",
-        "/character-consistency",
-        "/world-consistency",
-        "/timeline-view",
-    }:
-        return "Continuity & Integrity"
-
-    if root in {
-        "/rebuild-memory",
-        "/rebuild-summaries",
-    }:
-        return "Memory & Rebuild"
-
-    if root in {
-        "/research-topic",
-        "/research-scene",
-        "/research-apply",
-        "/research-integrity",
-        "/world-add",
-    }:
-        return "Research & Worldbuilding"
-
-    if root in {
-        "/ideas",
-        "/idea-resurface",
-    }:
-        return "Ideas & Creativity"
-
-    if root == "/help":
-        return "Help & Workflow"
-
-    return "Other Commands"
+HELP_SECTION_TAXONOMY: OrderedDict[str, list[str]] = OrderedDict(
+    [
+        (
+            "System",
+            [
+                "exit",
+                "/system",
+                "/system --tree",
+                "/system --map",
+                "/system --health",
+                "/novel-stats",
+                "/story-state",
+                "/rebuild-memory",
+                "/rebuild-summaries",
+            ],
+        ),
+        (
+            "Exports",
+            [
+                "/build-book",
+                "/export-book",
+                "/export-book --docx",
+                "/export-chapter",
+            ],
+        ),
+        (
+            "Drafting",
+            [
+                "/draft-list",
+                "/draft-load",
+                "/draft-pass",
+                "/draft-save",
+                "/drafts",
+                "/restore-draft",
+                "/save-draft",
+            ],
+        ),
+        (
+            "Writing",
+            [
+                "/chapter-summary",
+                "/scene-summary",
+                "/recap",
+                "/proofread",
+                "/ideas",
+                "/idea-resurface",
+            ],
+        ),
+        (
+            "Continuity & Integrity",
+            [
+                "/continuity-check",
+                "/book-integrity",
+                "/character-consistency",
+                "/world-consistency",
+                "/timeline-view",
+            ],
+        ),
+        (
+            "World",
+            [
+                "/research-topic",
+                "/research-scene",
+                "/research-apply",
+                "/research-integrity",
+                "/world-add",
+            ],
+        ),
+        (
+            "Help & Workflow",
+            [
+                "/help",
+                "/help --describe",
+                "/help --when",
+                "/help --workflow",
+            ],
+        ),
+    ]
+)
 
 
 def _print_columns(items: list[str], width: int) -> None:
@@ -5859,22 +5861,15 @@ def _print_columns(items: list[str], width: int) -> None:
 def print_help() -> None:
     """Show available commands."""
     terminal_width = shutil.get_terminal_size().columns
-    discovered_commands = sorted(set(ALL_COMMANDS + ["exit"]), key=lambda item: (item.split()[0], item))
-
-    sectioned_commands: OrderedDict[str, list[str]] = OrderedDict(
-        (section_title, []) for section_title in HELP_SECTION_ORDER
-    )
-
-    for command_name in discovered_commands:
-        sectioned_commands[_categorize_command(command_name)].append(command_name)
+    discovered_commands = set(ALL_COMMANDS + ["exit"])
 
     print("=== NOVEL AI COMMANDS ===")
     print()
-    for section_title, commands in sectioned_commands.items():
-        if not commands:
-            continue
+    for section_title in HELP_SECTION_ORDER:
+        section_commands = HELP_SECTION_TAXONOMY.get(section_title, [])
+        commands = sorted(command for command in section_commands if command in discovered_commands)
         print(f"[ {section_title} ]")
-        _print_columns(sorted(commands), terminal_width)
+        _print_columns(commands, terminal_width)
         print()
 
 
@@ -6311,7 +6306,7 @@ Audits all research topics for contradictions.
 
 WHEN CHECKING SYSTEM HEALTH
 
-/help --system-health
+/system --health
 
 Diagnoses:
 
@@ -6526,13 +6521,16 @@ HELP_COMMAND_DISCOVERY["/system --map"] = command_system_map
 
 def handle_system(command_text: str = "") -> None:
     """Route /system options to concrete system handlers."""
+    if "--health" in command_text:
+        handle_system_health()
+        return
     if "--map" in command_text:
         command_system_map()
         return
     if "--tree" in command_text:
         command_system_tree()
         return
-    print("Unsupported system option. Use /system --tree or /system --map")
+    print("Unsupported system option. Use /system --tree, /system --map, or /system --health")
 
 
 
@@ -6583,7 +6581,7 @@ def main() -> None:
         "/export-book": handle_export_book,
         "/export-book --docx": handle_export_book,
         "/novel-stats": lambda command_text="": handle_novel_stats(),
-        "/help --system-health": lambda command_text="": handle_system_health(),
+        "/system --health": handle_system,
         "/help --describe": lambda command_text="": handle_help_describe(),
         "/help --workflow": lambda command_text="": handle_help_workflow(),
         "/help --when": lambda command_text="": handle_help_when(),
