@@ -33,6 +33,8 @@ CANON_MEMORY_PATH = PROJECT_MEMORY_DIR / "canon_memory.txt"
 SCENE_SUMMARIES_PATH = PROJECT_MEMORY_DIR / "scene_summaries.txt"
 IDEAS_PATH = PROJECT_MEMORY_DIR / "ideas.txt"
 WORLD_RULES_PATH = PROJECT_MEMORY_DIR / "world.txt"
+STORY_STATE_PATH = PROJECT_MEMORY_DIR / "story_state.txt"
+TIMELINE_THREADS_PATH = PROJECT_MEMORY_DIR / "timeline_threads.txt"
 CHAPTER_FILENAME_PATTERN = re.compile(r"chapter_(\d+)\.txt$")
 SUGGESTION_PATTERN = re.compile(
     r"^\s*(\d+)\.\s*(.+?)\s*(?:→|->)\s*\[([^\]]+)\]\s*$",
@@ -54,6 +56,7 @@ IDEA_RESURFACE_TEMPERATURE = 0.3
 DRAFT_PASS_TEMPERATURE = 0.2
 RESEARCH_TEMPERATURE = 0.0
 RESEARCH_SCENE_TEMPERATURE = 0.0
+RECAP_TEMPERATURE = 0.3
 
 CONTINUITY_CHAPTER_WINDOW = 3
 MAX_SCENE_SUMMARIES = 5
@@ -65,6 +68,55 @@ Help the user think through story ideas, scenes, structure, tone, character, and
 Use the provided memory carefully and naturally.
 Be creative, clear, and practical.
 Do not invent persistent facts unless the user states them.
+"""
+
+RECAP_SYSTEM_PROMPT = """You are a calm narrative orientation assistant.
+
+Your task is to help the writer remember where the story currently is.
+
+You must:
+
+- describe current narrative situation
+- reflect emotional tone
+- identify immediate story focus
+- mention active unresolved pressures
+- describe story momentum
+
+You must NOT:
+
+- give writing advice
+- suggest future plot directions
+- critique pacing
+- analyse themes
+- perform continuity checking
+- mention screenplay alignment
+- invent new story facts
+
+Tone must feel:
+
+clear
+grounded
+present-focused
+mentally stabilising
+
+Return output in this exact structure:
+
+STORY RECAP
+
+Current Situation
+- ...
+
+Immediate Focus
+- ...
+
+Emotional Atmosphere
+- ...
+
+Active Narrative Pressures
+- ...
+
+Momentum Direction
+- ...
 """
 
 RESEARCH_SCENE_SYSTEM_PROMPT = """You are a hard-science realism consultant.
@@ -791,6 +843,95 @@ def load_memory_block(*, full: bool = False) -> str:
     if len(canon_text) > MAX_CANON_CHARACTERS:
         return canon_text[-MAX_CANON_CHARACTERS:]
     return canon_text
+
+
+def load_recap_canon_context() -> str:
+    """Load only recap-relevant canon sections with safe scaling."""
+    if not CANON_MEMORY_PATH.exists():
+        return "(empty)"
+
+    canon_text = clean_terminal_text(CANON_MEMORY_PATH.read_text(encoding="utf-8")).strip()
+    if not canon_text:
+        return "(empty)"
+
+    chapters = parse_canon_memory(canon_text)
+    if not chapters:
+        if len(canon_text) <= MAX_CANON_CHARACTERS:
+            return canon_text
+        chunked = chunk_text_blocks([canon_text], max_chars=MAX_CANON_CHARACTERS)
+        return chunked[-1] if chunked else canon_text[-MAX_CANON_CHARACTERS:]
+
+    latest_canon_chapter = max(chapters, key=lambda chapter: int(chapter.get("number", 0)))
+    active_states: list[str] = []
+    unresolved_threads: list[str] = []
+    latest_mission_context: list[str] = []
+
+    for chapter in chapters:
+        chapter_number = int(chapter.get("number", 0))
+        for story_state in chapter.get("story_states", []):
+            if str(story_state.get("state", "ACTIVE")).upper() != "ACTIVE":
+                continue
+            description = str(story_state.get("description", "")).strip()
+            if not description:
+                continue
+            state_line = f"Chapter {chapter_number}: {description}"
+            active_states.append(state_line)
+            if should_track_story_state(description, "Story State"):
+                unresolved_threads.append(state_line)
+
+        for category, facts in chapter.get("categories", {}).items():
+            category_lower = category.lower()
+            for fact in facts:
+                fact_text = normalize_fact_text(fact)
+                if not fact_text:
+                    continue
+                if "mission" in category_lower or "mission" in fact_text.lower():
+                    latest_mission_context.append(f"Chapter {chapter_number}: {fact_text}")
+
+    latest_chapter_block = render_canon_memory([latest_canon_chapter]).strip()
+    if not latest_chapter_block:
+        latest_chapter_block = "(none)"
+
+    if len(active_states) > 12:
+        active_states = active_states[-12:]
+    if len(unresolved_threads) > 12:
+        unresolved_threads = unresolved_threads[-12:]
+    if len(latest_mission_context) > 10:
+        latest_mission_context = latest_mission_context[-10:]
+
+    sections = [
+        "MOST RECENT CANON CHAPTER BLOCK\n"
+        f"{latest_chapter_block}",
+        "ACTIVE STORY STATES\n"
+        + ("\n".join(f"- {state}" for state in active_states) if active_states else "- None"),
+        "UNRESOLVED THREADS\n"
+        + ("\n".join(f"- {thread}" for thread in unresolved_threads) if unresolved_threads else "- None"),
+        "LATEST MISSION CONTEXT\n"
+        + (
+            "\n".join(f"- {item}" for item in latest_mission_context)
+            if latest_mission_context
+            else "- None"
+        ),
+    ]
+    recap_context = "\n\n".join(sections).strip()
+
+    if len(canon_text) <= MAX_CANON_CHARACTERS and len(recap_context) <= MAX_CANON_CHARACTERS:
+        return recap_context
+
+    recap_chunks = chunk_text_blocks([recap_context], max_chars=MAX_CANON_CHARACTERS)
+    if recap_chunks:
+        return recap_chunks[-1]
+    return recap_context[-MAX_CANON_CHARACTERS:]
+
+
+def load_optional_recap_context(path: Path, label: str) -> str:
+    """Load optional recap context file if present."""
+    if not path.exists():
+        return ""
+    content = clean_terminal_text(path.read_text(encoding="utf-8")).strip()
+    if not content:
+        return ""
+    return f"{label}:\n{content}"
 
 
 def load_world_rules_block() -> str:
@@ -3388,6 +3529,61 @@ def handle_chapter_summary(client: Any) -> None:
         )
 
 
+def handle_recap(client: Any) -> None:
+    """Generate a present-moment narrative recap from the latest chapter context."""
+    ensure_project_files()
+
+    chapter_paths = load_sorted_chapter_paths()
+    if not chapter_paths:
+        print("No chapters found.")
+        return
+
+    latest_chapter_path = chapter_paths[-1]
+    chapter_number = extract_chapter_number(latest_chapter_path)
+    latest_chapter_text = clean_terminal_text(latest_chapter_path.read_text(encoding="utf-8")).strip()
+    if not latest_chapter_text:
+        latest_chapter_text = "(empty)"
+
+    canon_context = load_recap_canon_context()
+    optional_context_blocks: list[str] = []
+    story_state_context = load_optional_recap_context(STORY_STATE_PATH, "Optional story_state.txt")
+    if story_state_context:
+        optional_context_blocks.append(story_state_context)
+    timeline_context = load_optional_recap_context(
+        TIMELINE_THREADS_PATH,
+        "Optional timeline_threads.txt",
+    )
+    if timeline_context:
+        optional_context_blocks.append(timeline_context)
+    optional_context = "\n\n".join(optional_context_blocks) if optional_context_blocks else "(none)"
+
+    recap_messages = [
+        {"role": "system", "content": RECAP_SYSTEM_PROMPT},
+        {
+            "role": "user",
+            "content": (
+                f"Latest chapter number: {chapter_number if chapter_number is not None else '(unknown)'}\n\n"
+                f"Latest chapter text:\n\n{latest_chapter_text}\n\n"
+                f"Scaled canon context:\n\n{canon_context}\n\n"
+                f"Optional context:\n\n{optional_context}"
+            ),
+        },
+    ]
+
+    try:
+        recap = request_chat_completion(
+            client=client,
+            messages=recap_messages,
+            temperature=RECAP_TEMPERATURE,
+        )
+    except Exception as exc:  # Keep terminal app stable for the user.
+        print(f"Recap failed: {exc}")
+        return
+
+    print()
+    print(recap)
+
+
 def handle_draft_pass(client: Any, command_text: str = "") -> None:
     """Run a structured editorial analysis pass without modifying project files."""
     normalized_command = command_text.strip().lower()
@@ -4914,6 +5110,7 @@ def print_help() -> None:
     print()
     print("WRITING")
     print("/scene-summary")
+    print("/recap")
     print("/proofread")
     print("/research-topic")
     print("/research-scene   → hard-science realism analysis for pasted scene")
@@ -5014,7 +5211,7 @@ Prevents narrative errors early.
 
 WHEN STORY DIRECTION FEELS UNCLEAR
 
-/context-snapshot
+/recap
 
 Use to:
 
@@ -5282,6 +5479,7 @@ def main() -> None:
 
     command_handlers: dict[str, Callable[[str], None]] = {
         "/scene-summary": lambda command_text="": handle_scene_summary(client),
+        "/recap": lambda command_text="": handle_recap(client),
         "/chapter-summary": lambda command_text="": handle_chapter_summary(client),
         "/rebuild-summaries": lambda command_text="": handle_rebuild_summaries(client),
         "/rebuild-memory": lambda command_text="": handle_rebuild_memory(client, command_text),
