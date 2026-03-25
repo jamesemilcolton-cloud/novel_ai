@@ -5143,9 +5143,142 @@ def print_help() -> None:
     print("SYSTEM")
     print("/novel-stats")
     print("/help --system-health")
+    print("/help --workflow")
     print("/help --when")
     print("/help")
     print("exit")
+
+
+def handle_help_workflow() -> None:
+    """Show the static master writing workflow guidance."""
+    print(
+        """==================================================
+NOVEL AI MASTER WRITING WORKFLOW
+==================================================
+
+PHASE 1 — RAW WRITING
+
+Write freely inside WordGrinder.
+Do NOT interrupt flow with AI.
+
+Export chapter text as:
+
+chapter_<number>.txt
+
+--------------------------------------------------
+
+PHASE 2 — SESSION CLEANUP
+
+/proofread
+→ grammar, punctuation, vocabulary clarity
+
+/scene-summary
+→ extract canon facts
+→ update story state
+→ maintain continuity memory
+
+/chapter-summary
+→ understand structural movement
+→ tension change
+→ resolved threads
+
+/continuity-check
+→ detect timeline, injury, location, world contradictions
+
+--------------------------------------------------
+
+PHASE 3 — STORY CONTROL (STRATEGIC USE)
+
+Use only when needed.
+
+/recap
+→ narrative re-orientation
+→ remember current story position
+
+/story-state
+→ view active unresolved arcs
+
+/timeline-view
+→ understand event order across novel
+
+/idea-resurface
+→ reintroduce previously saved ideas
+
+--------------------------------------------------
+
+PHASE 4 — DRAFT SAFETY + REVISION
+
+/draft-save
+→ create recoverable manuscript snapshot
+
+/draft-list
+→ view stored drafts
+
+/draft-load
+→ restore earlier manuscript state
+
+/draft-pass
+→ focused rewrite diagnostics
+→ structure / tension / clarity / character logic
+
+--------------------------------------------------
+
+PHASE 5 — LARGE SCALE STORY AUDITS
+
+Use occasionally, not daily.
+
+/book-integrity
+→ full-novel structural health check
+
+/world-consistency
+→ science-fiction world logic audit
+
+/character-consistency
+→ psychological behaviour audit
+
+/rebuild-memory
+→ resynchronise canon memory after major rewrites
+
+--------------------------------------------------
+
+PHASE 6 — SCIENTIFIC REALISM ENGINE
+
+/research-topic
+→ pure real-world science research
+
+/research-scene
+→ scientific realism analysis for pasted scene
+
+/research-apply
+→ check scene against saved research
+
+/research-integrity
+→ detect contradictions across research topics
+
+--------------------------------------------------
+
+PHASE 7 — MANUSCRIPT CREATION
+
+/build-book
+→ compile readable full manuscript
+
+/export-book --docx
+→ create professional submission manuscript
+
+--------------------------------------------------
+
+GOLDEN WRITING RHYTHM
+
+WRITE  
+→ PROOFREAD  
+→ SCENE SUMMARY  
+→ CONTINUITY CHECK  
+→ CONTINUE WRITING  
+
+Strategic commands only when necessary.
+
+=================================================="""
+    )
 
 
 def handle_help_when() -> None:
@@ -5509,6 +5642,7 @@ def main() -> None:
         "/export-book": handle_export_book,
         "/novel-stats": lambda command_text="": handle_novel_stats(),
         "/help --system-health": lambda command_text="": handle_system_health(),
+        "/help --workflow": lambda command_text="": handle_help_workflow(),
         "/help --when": lambda command_text="": handle_help_when(),
         "/help": lambda command_text="": print_help(),
     }
