@@ -35,6 +35,7 @@ PROJECT_BACKUPS_DIR = NOVEL_PROJECT_DIR / "backups"
 CANON_MEMORY_BACKUPS_DIR = PROJECT_MEMORY_DIR / "backups"
 RESEARCH_DIR = NOVEL_PROJECT_DIR / "research"
 RESEARCH_INTEGRITY_REPORTS_DIR = RESEARCH_DIR / "integrity_reports"
+WORLD_PLAUSIBILITY_REPORTS_DIR = PROJECT_ANALYSIS_DIR / "world_plausibility_reports"
 CANON_MEMORY_PATH = PROJECT_MEMORY_DIR / "canon_memory.txt"
 CONTINUITY_INDEX_PATH = PROJECT_MEMORY_DIR / "continuity_index.txt"
 UNPARSED_MEMORY_SUGGESTIONS_LOG_PATH = PROJECT_ANALYSIS_DIR / "unparsed_memory_suggestions.log"
@@ -796,6 +797,7 @@ def ensure_project_files() -> None:
     REBUILD_LOG_DIR.mkdir(parents=True, exist_ok=True)
     RESEARCH_DIR.mkdir(parents=True, exist_ok=True)
     RESEARCH_INTEGRITY_REPORTS_DIR.mkdir(parents=True, exist_ok=True)
+    WORLD_PLAUSIBILITY_REPORTS_DIR.mkdir(parents=True, exist_ok=True)
     PROJECT_BACKUPS_DIR.mkdir(parents=True, exist_ok=True)
     CANON_MEMORY_PATH.touch(exist_ok=True)
     CONTINUITY_INDEX_PATH.touch(exist_ok=True)
@@ -4222,6 +4224,87 @@ def handle_novel_stats() -> None:
     print(f"Shortest chapter: {shortest_chapter[0]} ({shortest_chapter[1]} words)")
 
 
+def command_research_world(client: Any) -> None:
+    """Analyse world.txt for plausibility and save a structured report."""
+    ensure_project_files()
+    world_file = NOVEL_PROJECT_DIR / "world.txt"
+
+    if not world_file.exists() or not world_file.is_file():
+        print("No world.txt file found.")
+        return
+
+    try:
+        with open(world_file, "r", encoding="utf-8") as file_handle:
+            world_text = clean_terminal_text(file_handle.read()).strip()
+    except OSError as exc:
+        print(f"Could not read world.txt: {exc}")
+        return
+
+    if not world_text:
+        print("world.txt is empty.")
+        return
+
+    messages = [
+        {
+            "role": "system",
+            "content": (
+                "You are a strict worldbuilding plausibility auditor. "
+                "Analyse the provided world file for physical plausibility "
+                "(technology, geography, biology, environment), social plausibility "
+                "(economics, politics, culture), internal consistency, logical contradictions, "
+                "and realism versus intentional stylisation. Provide concrete suggestions "
+                "to strengthen believability.\n\n"
+                "Return output in this exact format:\n\n"
+                "=== WORLD PLAUSIBILITY REPORT ===\n\n"
+                "Overall Plausibility Rating: (High / Medium / Low)\n\n"
+                "Strengths:\n"
+                "- bullet points\n\n"
+                "Concerns:\n"
+                "- bullet points\n\n"
+                "Contradictions Detected:\n"
+                "- bullet points\n\n"
+                "Suggestions:\n"
+                "- bullet points"
+            ),
+        },
+        {"role": "user", "content": f"world.txt contents:\n\n{world_text}"},
+    ]
+
+    try:
+        report = request_chat_completion(
+            client=client,
+            messages=messages,
+            temperature=RESEARCH_TEMPERATURE,
+        ).strip()
+    except Exception as exc:  # Keep terminal app stable for the user.
+        print(f"World plausibility analysis failed: {exc}")
+        return
+
+    timestamp = datetime.utcnow().strftime("%Y%m%d_%H%M%S")
+    report_path = WORLD_PLAUSIBILITY_REPORTS_DIR / f"world_plausibility_{timestamp}.txt"
+
+    try:
+        WORLD_PLAUSIBILITY_REPORTS_DIR.mkdir(parents=True, exist_ok=True)
+        atomic_write(report_path, report + "\n")
+    except OSError as exc:
+        print(f"Could not save world plausibility report: {exc}")
+        return
+
+    print("World plausibility analysis complete.")
+    print("Full report saved to analysis folder.")
+
+
+def handle_research(client: Any, command_text: str = "") -> None:
+    """Route /research options to concrete research handlers."""
+    parts = command_text.strip().split()
+    command = parts[0] if parts else ""
+    args = parts[1:] if len(parts) > 1 else []
+    if command == "/research" and "--world" in args:
+        command_research_world(client)
+        return
+    print("Unsupported research option. Use /research --world")
+
+
 def handle_system_health() -> None:
     """Run a deep non-AI filesystem diagnostic of novel project health."""
     now_utc = datetime.utcnow()
@@ -5568,6 +5651,14 @@ Canon memory impact: None.
 Manuscript impact: None.
 Safety level: Modifies data.
 When to use: Before consolidating world rules that depend on multiple research topics.""",
+    "/research --world": """Purpose: Analyse world.txt for plausibility, consistency, and believability.
+Files read: Project root world.txt.
+Files written: World plausibility report files.
+AI usage: Yes.
+Canon memory impact: None.
+Manuscript impact: None.
+Safety level: Modifies data.
+When to use: During worldbuilding QA before drafting or revision.""",
     "/help": """Purpose: Show available command list.
 Files read: None.
 Files written: None.
@@ -6561,6 +6652,7 @@ def main() -> None:
         "/research-scene": lambda command_text="": handle_research_scene(client),
         "/research-apply": lambda command_text="": handle_research_apply(client),
         "/research-integrity": lambda command_text="": handle_research_integrity(client),
+        "/research": lambda command_text="": handle_research(client, command_text),
         "/idea-resurface": lambda command_text="": handle_idea_resurface(client),
         "/draft-pass": lambda command_text="": handle_draft_pass(client, command_text),
         "/build-book": lambda command_text="": handle_build_book(),
