@@ -28,10 +28,13 @@ REBUILD_LOG_DIR = PROJECT_ANALYSIS_DIR / "rebuild_logs"
 FULL_NOVEL_PROCESSOR_LOG_DIR = NOVEL_PROJECT_DIR / "logs"
 FULL_NOVEL_PROCESSOR_LOG_PATH = FULL_NOVEL_PROCESSOR_LOG_DIR / "processor_log.txt"
 DRAFTS_DIR = NOVEL_PROJECT_DIR / "drafts"
+PROJECT_BACKUPS_DIR = NOVEL_PROJECT_DIR / "backups"
 CANON_MEMORY_BACKUPS_DIR = PROJECT_MEMORY_DIR / "backups"
 RESEARCH_DIR = NOVEL_PROJECT_DIR / "research"
 RESEARCH_INTEGRITY_REPORTS_DIR = RESEARCH_DIR / "integrity_reports"
 CANON_MEMORY_PATH = PROJECT_MEMORY_DIR / "canon_memory.txt"
+CONTINUITY_INDEX_PATH = PROJECT_MEMORY_DIR / "continuity_index.txt"
+UNPARSED_MEMORY_SUGGESTIONS_LOG_PATH = PROJECT_ANALYSIS_DIR / "unparsed_memory_suggestions.log"
 SCENE_SUMMARIES_PATH = PROJECT_MEMORY_DIR / "scene_summaries.txt"
 IDEAS_PATH = PROJECT_MEMORY_DIR / "ideas.txt"
 WORLD_RULES_PATH = PROJECT_MEMORY_DIR / "world.txt"
@@ -64,6 +67,7 @@ CONTINUITY_CHAPTER_WINDOW = 3
 MAX_SCENE_SUMMARIES = 5
 MAX_CONVERSATION_TURNS = 6
 MAX_CANON_CHARACTERS = 12000
+DEFAULT_ANALYSIS_CHUNK_WORDS = 6000
 
 MAIN_SYSTEM_PROMPT = """You are a thoughtful AI novel-writing assistant.
 Help the user think through story ideas, scenes, structure, tone, character, and prose.
@@ -789,7 +793,9 @@ def ensure_project_files() -> None:
     REBUILD_LOG_DIR.mkdir(parents=True, exist_ok=True)
     RESEARCH_DIR.mkdir(parents=True, exist_ok=True)
     RESEARCH_INTEGRITY_REPORTS_DIR.mkdir(parents=True, exist_ok=True)
+    PROJECT_BACKUPS_DIR.mkdir(parents=True, exist_ok=True)
     CANON_MEMORY_PATH.touch(exist_ok=True)
+    CONTINUITY_INDEX_PATH.touch(exist_ok=True)
     SCENE_SUMMARIES_PATH.touch(exist_ok=True)
     IDEAS_PATH.touch(exist_ok=True)
     WORLD_RULES_PATH.touch(exist_ok=True)
@@ -801,6 +807,21 @@ def atomic_write(path: Path, text: str) -> None:
     tmp = path.with_suffix(path.suffix + ".tmp")
     tmp.write_text(text, encoding="utf-8")
     tmp.replace(path)
+
+
+def create_operation_backup(backup_type: str, source_path: Path | None = None, content: str | None = None) -> Path:
+    """Create project-level timestamp backup for canon/chapter/draft restore operations."""
+    PROJECT_BACKUPS_DIR.mkdir(parents=True, exist_ok=True)
+    backup_timestamp = datetime.utcnow().strftime("%Y%m%d_%H%M")
+    backup_path = PROJECT_BACKUPS_DIR / f"backup_{backup_type}_{backup_timestamp}.txt"
+    if content is not None:
+        backup_content = content
+    elif source_path is not None and source_path.exists():
+        backup_content = source_path.read_text(encoding="utf-8")
+    else:
+        backup_content = ""
+    atomic_write(backup_path, backup_content)
+    return backup_path
 
 
 def create_canon_memory_guard_backup() -> Path:
@@ -820,6 +841,7 @@ def create_canon_memory_guard_backup() -> Path:
 def guarded_write_canon_memory(chapters: list[dict[str, Any]]) -> None:
     """Safely write canon memory with pre-write backup and post-write validation."""
     backup_path = create_canon_memory_guard_backup()
+    create_operation_backup("canon", source_path=CANON_MEMORY_PATH)
     rendered_memory = render_canon_memory(chapters)
 
     try:
@@ -832,6 +854,7 @@ def guarded_write_canon_memory(chapters: list[dict[str, Any]]) -> None:
     try:
         written_text = CANON_MEMORY_PATH.read_text(encoding="utf-8")
         parse_canon_memory(written_text)
+        refresh_continuity_index(chapters)
     except Exception as exc:
         rollback_text = backup_path.read_text(encoding="utf-8")
         atomic_write(CANON_MEMORY_PATH, rollback_text)
@@ -1657,6 +1680,16 @@ def write_rebuild_log(
     return log_path
 
 
+def validate_rebuilt_canon_text(text: str) -> bool:
+    """Return True if rebuilt canon text is non-empty and contains categories."""
+    if not text.strip():
+        return False
+    parsed = parse_canon_memory(text)
+    if not parsed:
+        return False
+    return any(chapter.get("categories") for chapter in parsed)
+
+
 
 def extract_chapter_number(path: Path) -> int | None:
     """Return the chapter number from a chapter filename."""
@@ -1801,6 +1834,25 @@ def build_safe_chunks(text: str, max_chars: int = 12000) -> list[str]:
     return chunks
 
 
+def split_text_by_word_count(text: str, max_words: int = DEFAULT_ANALYSIS_CHUNK_WORDS) -> list[str]:
+    """Split text into chunks of roughly max_words while preserving order."""
+    cleaned_text = clean_terminal_text(text).strip()
+    if not cleaned_text:
+        return []
+
+    words = cleaned_text.split()
+    chunks: list[str] = []
+    for index in range(0, len(words), max_words):
+        chunks.append(" ".join(words[index:index + max_words]))
+    return chunks
+
+
+def print_large_manuscript_warning_if_needed(text: str) -> None:
+    """Warn when manuscript enters large-novel scale processing."""
+    if len(clean_terminal_text(text).split()) > 90000:
+        print("Large manuscript mode active — processing may be slower.")
+
+
 def write_full_novel_processor_log(
     command_name: str,
     chunk_count: int,
@@ -1924,7 +1976,7 @@ def chunk_text_blocks(blocks: list[str], max_chars: int = 12000) -> list[str]:
 
 def split_manuscript_into_chunks(full_text: str) -> list[str]:
     """Split manuscript text into safe bounded chunks for full-book analysis."""
-    return build_safe_chunks(full_text, max_chars=12000)
+    return split_text_by_word_count(full_text, max_words=DEFAULT_ANALYSIS_CHUNK_WORDS)
 
 
 def run_chunked_analysis(
@@ -1992,9 +2044,49 @@ def prompt_for_destructive_confirmation() -> bool:
 
 def create_canon_memory_backup() -> None:
     """Create a timestamped canon memory backup before rebuild operations."""
-    backup_path = create_canon_memory_guard_backup()
+    backup_path = create_operation_backup("canon", source_path=CANON_MEMORY_PATH)
     print("Canon memory backup created.")
     print(f"Backup path: {backup_path}")
+
+
+def build_continuity_index(chapters: list[dict[str, Any]]) -> str:
+    """Build a lightweight continuity index from canon memory chapters."""
+    lines: list[str] = ["CONTINUITY INDEX", ""]
+    category_groups = (
+        ("key injuries", {"Injury"}),
+        ("mission milestones", {"Timeline", "Mission State — Active", "Mission State — Resolved"}),
+        ("location changes", {"Location"}),
+        ("major character events", {"Character", "Relationship", "Psychological State — Active", "Psychological State — Resolved", "Relationship State — Active", "Relationship State — Resolved"}),
+    )
+
+    for heading, categories in category_groups:
+        lines.append(f"{heading}:")
+        added = 0
+        for chapter in sorted(chapters, key=lambda item: item["number"]):
+            chapter_number = chapter["number"]
+            for category_name in categories:
+                for fact in chapter["categories"].get(category_name, []):
+                    text = get_fact_text(fact)
+                    if not text:
+                        continue
+                    lines.append(f"- Ch {chapter_number}: {text}")
+                    added += 1
+                    if added >= 40:
+                        break
+                if added >= 40:
+                    break
+            if added >= 40:
+                break
+        if added == 0:
+            lines.append("- none recorded")
+        lines.append("")
+
+    return "\n".join(lines).rstrip() + "\n"
+
+
+def refresh_continuity_index(chapters: list[dict[str, Any]]) -> None:
+    """Persist continuity index alongside canon memory updates."""
+    atomic_write(CONTINUITY_INDEX_PATH, build_continuity_index(chapters))
 
 
 
@@ -2092,13 +2184,42 @@ def prompt_for_research_choice(
 def parse_memory_suggestions(result: str) -> list[tuple[int, str, str]]:
     """Parse numbered memory suggestions from the scene extractor output."""
     suggestions: list[tuple[int, str, str]] = []
-    for match in SUGGESTION_PATTERN.finditer(result):
-        number = int(match.group(1))
-        fact = match.group(2).strip()
-        category = match.group(3).strip()
-        if category not in ALLOWED_MEMORY_CATEGORIES:
+    unparsed_lines: list[str] = []
+    seen = set()
+    flexible_pattern = re.compile(
+        r"^\s*(?:[-*•]\s*)?(?:(\d+)\s*[.)-]?\s*)?(.+?)\s*(?:→|->|=>)\s*\[\s*([^\]]+?)\s*\]\s*$"
+    )
+
+    for line in result.splitlines():
+        stripped = line.strip()
+        if not stripped or stripped.lower().startswith("memory suggestions"):
             continue
+        match = flexible_pattern.match(stripped)
+        if not match:
+            unparsed_lines.append(stripped)
+            continue
+        number = int(match.group(1)) if match.group(1) else len(suggestions) + 1
+        fact = re.sub(r"\s+", " ", match.group(2)).strip(" -\t")
+        category = re.sub(r"\s+", " ", match.group(3)).strip()
+        if category not in ALLOWED_MEMORY_CATEGORIES or not fact:
+            unparsed_lines.append(stripped)
+            continue
+        dedupe_key = (fact.lower(), category)
+        if dedupe_key in seen:
+            continue
+        seen.add(dedupe_key)
         suggestions.append((number, fact, category))
+
+    if unparsed_lines:
+        try:
+            timestamp = datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S UTC")
+            with UNPARSED_MEMORY_SUGGESTIONS_LOG_PATH.open("a", encoding="utf-8") as handle:
+                handle.write(f"{timestamp}\n")
+                for line in unparsed_lines:
+                    handle.write(f"- {line}\n")
+                handle.write("\n")
+        except OSError:
+            pass
     return suggestions
 
 
@@ -2434,7 +2555,9 @@ def build_scene_summary_messages(
 def build_continuity_messages(
     memory_block: str,
     world_rules_block: str,
-    previous_chapters_block: str,
+    previous_chapter_block: str,
+    latest_chapter_block: str,
+    continuity_index_block: str,
     selected_chapter_name: str,
     selected_chapter_text: str,
 ) -> list[dict[str, str]]:
@@ -2449,7 +2572,9 @@ def build_continuity_messages(
             "content": (
                 f"Canon memory:\n\n{memory_block}\n\n"
                 f"World rules:\n\n{world_rules_block}\n\n"
-                f"Previous chapters:\n\n{previous_chapters_block}\n\n"
+                f"Continuity index:\n\n{continuity_index_block}\n\n"
+                f"Previous chapter:\n\n{previous_chapter_block}\n\n"
+                f"Latest chapter:\n\n{latest_chapter_block}\n\n"
                 f"Selected chapter ({selected_chapter_name}):\n\n{selected_chapter_text}"
             ),
         },
@@ -2969,21 +3094,26 @@ def handle_continuity_check(client: Any) -> None:
         return
 
     selected_index = chapter_paths.index(selected_path)
-    previous_paths = chapter_paths[
-        max(0, selected_index - CONTINUITY_CHAPTER_WINDOW):selected_index
-    ]
-    print(
-        f"Using last {len(previous_paths)} chapters for continuity context."
-    )
+    previous_path = chapter_paths[selected_index - 1] if selected_index > 0 else None
+    latest_path = chapter_paths[-1] if chapter_paths else None
+    print("Using previous chapter + latest chapter + continuity index for context.")
 
     memory_block = load_memory_block(full=True)
     world_rules_block = load_world_rules_block()
-    previous_chapters_block = format_chapter_block(previous_paths)
+    previous_chapter_block = format_chapter_block([previous_path]) if previous_path else "(none)"
+    latest_chapter_block = format_chapter_block([latest_path]) if latest_path else "(none)"
+    continuity_index_block = (
+        read_text_file(CONTINUITY_INDEX_PATH)
+        if CONTINUITY_INDEX_PATH.exists()
+        else "(none)"
+    )
     selected_chapter_text = selected_path.read_text(encoding="utf-8").strip()
     messages = build_continuity_messages(
         memory_block=memory_block,
         world_rules_block=world_rules_block,
-        previous_chapters_block=previous_chapters_block,
+        previous_chapter_block=previous_chapter_block,
+        latest_chapter_block=latest_chapter_block,
+        continuity_index_block=continuity_index_block,
         selected_chapter_name=selected_path.name,
         selected_chapter_text=selected_chapter_text,
     )
@@ -3027,7 +3157,8 @@ def handle_book_integrity(client: Any) -> None:
 
     chapter_blocks = load_all_chapters()
     manuscript_text = "\n\n".join(chapter_blocks).strip()
-    chunked_blocks = build_safe_chunks(manuscript_text)
+    print_large_manuscript_warning_if_needed(manuscript_text)
+    chunked_blocks = split_manuscript_into_chunks(manuscript_text)
     if not chunked_blocks:
         print("No chapter text found.")
         return
@@ -3132,13 +3263,15 @@ def handle_world_consistency(client: Any) -> None:
         print("No chapter text found.")
         return
 
+    full_manuscript_text = "\n\n".join(chapter_blocks)
+    print_large_manuscript_warning_if_needed(full_manuscript_text)
     chunk_blocks = [
         (
             f"Canon memory:\n\n{canon_memory}\n\n"
             f"World rules:\n\n{world_rules}\n\n"
             f"Novel chunk:\n\n{chunk_text}"
         )
-        for chunk_text in build_safe_chunks("\n\n".join(chapter_blocks), max_chars=10000)
+        for chunk_text in split_manuscript_into_chunks(full_manuscript_text)
     ]
     if not chunk_blocks:
         print("No chapter text found.")
@@ -3202,12 +3335,14 @@ def handle_character_consistency(client: Any) -> None:
         print("No chapter text found.")
         return
 
+    full_manuscript_text = "\n\n".join(chapter_blocks)
+    print_large_manuscript_warning_if_needed(full_manuscript_text)
     chunk_blocks = [
         (
             f"Canon memory:\n\n{canon_memory}\n\n"
             f"Novel chunk:\n\n{chunk_text}"
         )
-        for chunk_text in build_safe_chunks("\n\n".join(chapter_blocks), max_chars=10000)
+        for chunk_text in split_manuscript_into_chunks(full_manuscript_text)
     ]
     if not chunk_blocks:
         print("No chapter text found.")
@@ -3263,7 +3398,9 @@ def handle_rebuild_memory(client: Any, command_text: str = "") -> None:
             print("Rebuild aborted.")
             return
         try:
-            create_canon_memory_backup()
+            pre_rebuild_backup_path = create_operation_backup("canon", source_path=CANON_MEMORY_PATH)
+            print("Canon memory backup created.")
+            print(f"Backup path: {pre_rebuild_backup_path}")
         except OSError as exc:
             print(f"Could not create canon memory backup: {exc}")
             return
@@ -3303,7 +3440,15 @@ def handle_rebuild_memory(client: Any, command_text: str = "") -> None:
         rebuilt_chapters = consolidate_story_states(rebuilt_chapters)
 
         try:
-            guarded_write_canon_memory(rebuilt_chapters)
+            rendered_memory = render_canon_memory(rebuilt_chapters)
+            temp_rebuild_path = CANON_MEMORY_PATH.with_suffix(".txt.rebuild_tmp")
+            atomic_write(temp_rebuild_path, rendered_memory)
+            rebuilt_text = temp_rebuild_path.read_text(encoding="utf-8")
+            if not validate_rebuilt_canon_text(rebuilt_text):
+                raise OSError("Rebuild validation failed: empty or missing categories.")
+            atomic_write(CANON_MEMORY_PATH, rebuilt_text)
+            refresh_continuity_index(rebuilt_chapters)
+            temp_rebuild_path.unlink(missing_ok=True)
             log_path = write_rebuild_log(
                 mode="FULL",
                 lines=[
@@ -3313,6 +3458,13 @@ def handle_rebuild_memory(client: Any, command_text: str = "") -> None:
                 ],
             )
         except OSError as exc:
+            try:
+                rollback_text = pre_rebuild_backup_path.read_text(encoding="utf-8")
+                atomic_write(CANON_MEMORY_PATH, rollback_text)
+                print("Rebuild failed; canon memory restored from backup.")
+            except OSError as restore_exc:
+                print(f"Rebuild failed and restore failed: {restore_exc}")
+                return
             print(f"Rebuild completed, but could not save files: {exc}")
             return
 
@@ -3765,7 +3917,9 @@ def handle_draft_pass(client: Any, command_text: str = "") -> None:
             return
 
         chapter_blocks = load_all_chapters()
-        chapter_chunks = build_safe_chunks("\n\n".join(chapter_blocks))
+        full_manuscript_text = "\n\n".join(chapter_blocks)
+        print_large_manuscript_warning_if_needed(full_manuscript_text)
+        chapter_chunks = split_manuscript_into_chunks(full_manuscript_text)
         if not chapter_chunks:
             print("No chapter text found.")
             return
@@ -3954,7 +4108,7 @@ def handle_draft_load() -> None:
     if not draft_paths:
         return
 
-    if not prompt_for_destructive_confirmation():
+    if not prompt_for_confirmation("Restore will overwrite current manuscript. Continue? (y/n)"):
         print("Draft load aborted.")
         return
 
@@ -3987,7 +4141,15 @@ def handle_draft_load() -> None:
         return
 
     try:
+        current_manuscript_snapshot = build_manuscript_text(load_sorted_chapter_paths())
+        create_operation_backup("chapter_restore", content=current_manuscript_snapshot)
+        create_operation_backup("draft_restore", source_path=selected_draft)
         CHAPTERS_DIR.mkdir(parents=True, exist_ok=True)
+        draft_chapter_numbers = {chapter_number for chapter_number, _ in chapter_entries}
+        for existing_path in load_sorted_chapter_paths():
+            existing_number = extract_chapter_number(existing_path)
+            if existing_number is not None and existing_number not in draft_chapter_numbers:
+                existing_path.unlink(missing_ok=True)
         for chapter_number, chapter_text in chapter_entries:
             chapter_path = CHAPTERS_DIR / f"chapter_{chapter_number}.txt"
             atomic_write(chapter_path, chapter_text + ("\n" if chapter_text else ""))
@@ -4401,6 +4563,43 @@ def tokenize_timeline_text(text: str) -> set[str]:
 
 
 
+def extract_temporal_references(text: str) -> set[str]:
+    """Extract explicit temporal markers used for safer timeline merging."""
+    return {
+        match.group(0).lower()
+        for match in re.finditer(
+            r"\b(?:day|week|month|year|hour|minute)\s+\d+\b|\b(?:before|after|during|later|earlier|tonight|tomorrow|yesterday)\b",
+            text.lower(),
+        )
+    }
+
+
+def infer_event_type(tokens: set[str]) -> str:
+    """Infer coarse event type for timeline merge matching."""
+    if tokens & INJURY_KEYWORDS:
+        return "injury"
+    if tokens & RELATIONSHIP_KEYWORDS:
+        return "relationship"
+    if tokens & CONFLICT_KEYWORDS:
+        return "conflict"
+    if tokens & DISCOVERY_KEYWORDS:
+        return "discovery"
+    if tokens & MISSION_KEYWORDS:
+        return "mission"
+    return "generic"
+
+
+def extract_unique_nouns(tokens: set[str]) -> set[str]:
+    """Extract less-generic continuity anchors from tokens."""
+    generic_tokens = TIMELINE_STOPWORDS | {"mission", "crew", "team", "system", "base"}
+    return {token for token in tokens if len(token) >= 5 and token not in generic_tokens}
+
+
+def extract_character_tokens(tokens: set[str]) -> set[str]:
+    """Extract likely character-name tokens for merge logic."""
+    return {token for token in tokens if token in CHARACTER_KEYWORDS or token.startswith(("dr", "capt", "cmdr"))}
+
+
 def is_plot_relevant_event(category: str, text: str) -> bool:
     """Filter out low-impact atmosphere notes from the timeline view."""
     if category not in {"World", "Location"}:
@@ -4488,6 +4687,10 @@ def build_timeline_event(
         "state": "RESOLVED" if state == "RESOLVED" else "ACTIVE",
         "narrative_category": infer_timeline_category(source_category, text, state),
         "tokens": tokens,
+        "event_type": infer_event_type(tokens),
+        "character_tokens": extract_character_tokens(tokens),
+        "unique_nouns": extract_unique_nouns(tokens),
+        "temporal_references": extract_temporal_references(text),
     }
 
 
@@ -4497,20 +4700,17 @@ def events_share_thread(event_a: dict[str, Any], event_b: dict[str, Any]) -> boo
     if facts_are_similar(event_a["text"], event_b["text"]):
         return True
 
-    shared_tokens = event_a["tokens"] & event_b["tokens"]
-    if len(shared_tokens) >= 2:
+    if event_a["unique_nouns"] & event_b["unique_nouns"]:
         return True
 
-    if len(shared_tokens) == 1:
-        shared_token = next(iter(shared_tokens))
-        if (
-            shared_token in {"shield", "engine", "mission", "signal", "reactor"}
-            and (
-                event_a["narrative_category"] == event_b["narrative_category"]
-                or "RESOLVED" in {event_a["state"], event_b["state"]}
-            )
-        ):
-            return True
+    if (
+        event_a["event_type"] == event_b["event_type"]
+        and event_a["character_tokens"] & event_b["character_tokens"]
+    ):
+        return True
+
+    if event_a["temporal_references"] & event_b["temporal_references"]:
+        return True
 
     return False
 
@@ -5012,6 +5212,8 @@ def handle_export_chapter() -> None:
         return
 
     try:
+        if export_path.exists():
+            create_operation_backup("chapter_restore", source_path=export_path)
         atomic_write(export_path, "")
     except OSError as exc:
         print(f"Could not prepare export file: {exc}")
@@ -5145,7 +5347,7 @@ def handle_export_book_docx() -> None:
     try:
         document.save(str(output_path))
     except Exception as exc:  # Keep terminal app stable for the user.
-        print(f"Export failed: {exc}")
+        print(f"DOCX export failed: {exc}")
         return
 
     output_display = str(output_path).replace(str(Path.home()), "~", 1)
@@ -5167,38 +5369,7 @@ def print_welcome() -> None:
     print("Type /help for commands or type exit to quit.")
 
 
-ALL_COMMANDS = [
-    "/scene-summary",
-    "/proofread",
-    "/rebuild-memory",
-    "/continuity-check",
-    "/story-state",
-    "/timeline-view",
-    "/chapter-summary",
-    "/ideas",
-    "/idea-resurface",
-    "/world-add",
-    "/draft-save",
-    "/draft-list",
-    "/draft-load",
-    "/draft-pass",
-    "/book-integrity",
-    "/build-book",
-    "/export-book --docx",
-    "/world-consistency",
-    "/character-consistency",
-    "/recap",
-    "/research-topic",
-    "/research-scene",
-    "/research-apply",
-    "/research-integrity",
-    "/help",
-    "/help --workflow",
-    "/help --when",
-    "/help --system-health",
-    "/help --describe",
-    "exit",
-]
+ALL_COMMANDS: list[str] = []
 
 
 COMMAND_HELP = {
@@ -5480,47 +5651,27 @@ def handle_help_describe() -> None:
 def print_help() -> None:
     """Show available commands."""
     print("Available commands:")
-    print()
-    print("WRITING")
-    print("/scene-summary")
-    print("/recap")
-    print("/proofread")
-    print("/research-topic")
-    print("/research-scene   → hard-science realism analysis for pasted scene")
-    print("/research-apply   → apply saved research topic as realism auditor")
-    print("/research-integrity")
-    print()
-    print("MEMORY")
-    print("/rebuild-memory")
-    print("/story-state")
-    print("/timeline-view")
-    print()
-    print("IDEAS")
-    print("/ideas")
-    print("/idea-resurface")
-    print()
-    print("DRAFTS")
-    print("/draft-save")
-    print("/draft-list")
-    print("/draft-load")
-    print("/draft-pass --structure")
-    print("/draft-pass --tension")
-    print()
-    print("BOOK")
-    print("/build-book")
-    print("/export-book --docx")
-    print("/book-integrity")
-    print("/world-consistency")
-    print("/character-consistency")
-    print()
-    print("SYSTEM")
-    print("/novel-stats")
-    print("/help --system-health")
-    print("/help --describe")
-    print("/help --workflow")
-    print("/help --when")
-    print("/help")
+    for command_name in ALL_COMMANDS:
+        print(command_name)
     print("exit")
+
+
+def update_help_commands_from_handlers(command_handlers: dict[str, Callable[[str], None]]) -> None:
+    """Synchronize help-menu command list from active command handlers."""
+    global ALL_COMMANDS
+    ALL_COMMANDS = sorted(set(command_handlers.keys()), key=lambda item: (item.split()[0], item))
+
+
+def command_matches_input(command_name: str, user_input: str) -> bool:
+    """Flexible command routing with prefix support for option-bearing commands."""
+    normalized_user_input = user_input.strip()
+    if normalized_user_input == command_name:
+        return True
+    if normalized_user_input.startswith(f"{command_name} "):
+        return True
+    if " " in command_name and normalized_user_input.startswith(command_name):
+        return True
+    return False
 
 
 def handle_help_workflow() -> None:
@@ -6014,6 +6165,7 @@ def main() -> None:
         "/story-state": lambda command_text="": handle_story_state(),
         "/export-chapter": lambda command_text="": handle_export_chapter(),
         "/export-book": handle_export_book,
+        "/export-book --docx": handle_export_book,
         "/novel-stats": lambda command_text="": handle_novel_stats(),
         "/help --system-health": lambda command_text="": handle_system_health(),
         "/help --describe": lambda command_text="": handle_help_describe(),
@@ -6021,6 +6173,7 @@ def main() -> None:
         "/help --when": lambda command_text="": handle_help_when(),
         "/help": lambda command_text="": print_help(),
     }
+    update_help_commands_from_handlers(command_handlers)
 
     print_welcome()
 
@@ -6045,7 +6198,7 @@ def main() -> None:
 
         routed = False
         for command_name in sorted(command_handlers.keys(), key=len, reverse=True):
-            if user_input == command_name or user_input.startswith(f"{command_name} "):
+            if command_matches_input(command_name, user_input):
                 command_handlers[command_name](user_input)
                 routed = True
                 break
