@@ -25,6 +25,8 @@ CONTINUITY_REPORTS_DIR = PROJECT_ANALYSIS_DIR / "continuity_reports"
 TIMELINE_LOGS_DIR = PROJECT_ANALYSIS_DIR / "timeline_logs"
 BOOK_INTEGRITY_REPORTS_DIR = PROJECT_ANALYSIS_DIR / "book_integrity_reports"
 REBUILD_LOG_DIR = PROJECT_ANALYSIS_DIR / "rebuild_logs"
+FULL_NOVEL_PROCESSOR_LOG_DIR = NOVEL_PROJECT_DIR / "logs"
+FULL_NOVEL_PROCESSOR_LOG_PATH = FULL_NOVEL_PROCESSOR_LOG_DIR / "processor_log.txt"
 DRAFTS_DIR = NOVEL_PROJECT_DIR / "drafts"
 BACKUPS_DIR = NOVEL_PROJECT_DIR / "backups"
 RESEARCH_DIR = NOVEL_PROJECT_DIR / "research"
@@ -1677,121 +1679,215 @@ def build_manuscript_text(chapter_paths: list[Path]) -> str:
     return "\n\n".join(sections) + ("\n\n" if sections else "")
 
 
-def chunk_text_blocks(blocks: list[str], max_chars: int = 12000) -> list[str]:
-    """Group text blocks into bounded chunks for safer long-form analysis calls."""
-    chunks: list[str] = []
-    current_parts: list[str] = []
-    current_length = 0
+def load_all_chapters() -> list[str]:
+    """Load all chapter_<number>.txt files in numeric order as labeled text blocks."""
+    if not CHAPTERS_DIR.exists() or not CHAPTERS_DIR.is_dir():
+        return []
 
-    for raw_block in blocks:
-        block = raw_block.strip()
-        if not block:
+    chapter_blocks: list[str] = []
+    for chapter_path in load_sorted_chapter_paths():
+        chapter_number = extract_chapter_number(chapter_path)
+        if chapter_number is None:
             continue
-
-        block_length = len(block)
-        separator_length = 2 if current_parts else 0
-
-        if current_parts and current_length + separator_length + block_length > max_chars:
-            chunks.append("\n\n".join(current_parts))
-            current_parts = [block]
-            current_length = block_length
+        try:
+            chapter_text = clean_terminal_text(chapter_path.read_text(encoding="utf-8")).strip()
+        except OSError as exc:
+            print(f"Warning: Could not read {chapter_path.name}: {exc}")
             continue
-
-        if block_length > max_chars:
-            if current_parts:
-                chunks.append("\n\n".join(current_parts))
-                current_parts = []
-                current_length = 0
-            start = 0
-            while start < block_length:
-                end = min(start + max_chars, block_length)
-                chunks.append(block[start:end])
-                start = end
+        if not chapter_text:
             continue
+        chapter_blocks.append(f"CHAPTER {chapter_number}\n\n{chapter_text}")
 
-        current_parts.append(block)
-        current_length += separator_length + block_length
-
-    if current_parts:
-        chunks.append("\n\n".join(current_parts))
-
-    return chunks
+    return chapter_blocks
 
 
-def split_manuscript_into_chunks(full_text: str) -> list[str]:
-    """Split a manuscript into deterministic 6k-8k word chunks on natural boundaries."""
-    cleaned_text = clean_terminal_text(full_text).strip()
+def build_safe_chunks(text: str, max_chars: int = 12000) -> list[str]:
+    """Split text into bounded chunks on paragraph boundaries without cutting words."""
+    cleaned_text = clean_terminal_text(text).strip()
     if not cleaned_text:
         return []
 
-    min_words = 6000
-    max_words = 8000
-
-    chapter_pattern = re.compile(
-        r"(?im)^={2,}\s*\n\s*chapter\s+\d+[^\n]*\n={2,}\s*$|^chapter\s+\d+[^\n]*$"
-    )
-    paragraph_pattern = re.compile(r"\n\s*\n+")
-
-    def word_count(text: str) -> int:
-        return len(re.findall(r"\S+", text))
-
-    def split_oversized_paragraph(paragraph_text: str) -> list[str]:
-        words = paragraph_text.split()
-        if len(words) <= max_words:
-            return [paragraph_text]
-        parts: list[str] = []
-        start = 0
-        while start < len(words):
-            end = min(start + max_words, len(words))
-            parts.append(" ".join(words[start:end]))
-            start = end
-        return parts
-
-    raw_sections = [section.strip() for section in chapter_pattern.split(cleaned_text) if section.strip()]
-    headings = chapter_pattern.findall(cleaned_text)
-
-    sections: list[str] = []
-    if headings and len(raw_sections) == len(headings):
-        for heading, body in zip(headings, raw_sections):
-            sections.append(f"{heading.strip()}\n\n{body.strip()}".strip())
-    else:
-        sections = [cleaned_text]
+    paragraphs = [paragraph.strip() for paragraph in re.split(r"\n\s*\n+", cleaned_text) if paragraph.strip()]
+    if not paragraphs:
+        return []
 
     chunks: list[str] = []
-    current_parts: list[str] = []
-    current_words = 0
+    current_paragraphs: list[str] = []
+    current_length = 0
 
-    for section in sections:
-        paragraphs = [part.strip() for part in paragraph_pattern.split(section) if part.strip()]
-        for paragraph in paragraphs:
-            paragraph_parts = split_oversized_paragraph(paragraph)
-            for paragraph_part in paragraph_parts:
-                paragraph_words = word_count(paragraph_part)
-                if not paragraph_words:
+    def append_current_chunk() -> None:
+        nonlocal current_paragraphs, current_length
+        if current_paragraphs:
+            chunks.append("\n\n".join(current_paragraphs).strip())
+            current_paragraphs = []
+            current_length = 0
+
+    def split_large_paragraph(paragraph_text: str) -> list[str]:
+        words = paragraph_text.split()
+        if not words:
+            return []
+
+        pieces: list[str] = []
+        current_words: list[str] = []
+        current_word_length = 0
+
+        for word in words:
+            word_length = len(word)
+            separator = 1 if current_words else 0
+            if current_words and current_word_length + separator + word_length > max_chars:
+                pieces.append(" ".join(current_words))
+                current_words = [word]
+                current_word_length = word_length
+                continue
+
+            current_words.append(word)
+            current_word_length += separator + word_length
+
+        if current_words:
+            pieces.append(" ".join(current_words))
+
+        return pieces
+
+    for paragraph in paragraphs:
+        paragraph_parts = split_large_paragraph(paragraph)
+        for paragraph_part in paragraph_parts:
+            part_length = len(paragraph_part)
+            separator_length = 2 if current_paragraphs else 0
+
+            if current_paragraphs and current_length + separator_length + part_length > max_chars:
+                append_current_chunk()
+
+            current_paragraphs.append(paragraph_part)
+            current_length += (2 if len(current_paragraphs) > 1 else 0) + part_length
+
+    append_current_chunk()
+    return chunks
+
+
+def write_full_novel_processor_log(
+    command_name: str,
+    chunk_count: int,
+    success: bool,
+) -> None:
+    """Append full-novel processor execution status to the processor log."""
+    timestamp = datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S UTC")
+    try:
+        FULL_NOVEL_PROCESSOR_LOG_DIR.mkdir(parents=True, exist_ok=True)
+        with FULL_NOVEL_PROCESSOR_LOG_PATH.open("a", encoding="utf-8") as handle:
+            handle.write(
+                f"{timestamp} | command={command_name} | chunks={chunk_count} | "
+                f"status={'success' if success else 'failure'}\n"
+            )
+    except OSError as exc:
+        print(f"Warning: Could not write processor log: {exc}")
+
+
+def process_chunks(
+    client: Any,
+    system_prompt: str,
+    chunks: list[str],
+    *,
+    temperature: float = CONTINUITY_TEMPERATURE,
+) -> list[str]:
+    """Process chunk requests with one retry and continue on repeated failures."""
+    summaries: list[str] = []
+    ordered_chunks = [chunk.strip() for chunk in chunks if chunk.strip()]
+
+    for chunk_index, chunk_text in enumerate(ordered_chunks, start=1):
+        print(f"Processing chunk {chunk_index} / {len(ordered_chunks)}")
+        response_text = ""
+        for attempt in range(2):
+            try:
+                response_text = request_chat_completion(
+                    client=client,
+                    messages=[
+                        {"role": "system", "content": system_prompt},
+                        {"role": "user", "content": chunk_text},
+                    ],
+                    temperature=temperature,
+                ).strip()
+                break
+            except Exception as exc:  # Keep terminal app stable for the user.
+                if attempt == 0:
+                    print(f"Warning: Chunk {chunk_index} failed, retrying once: {exc}")
                     continue
+                print(f"Warning: Chunk {chunk_index} skipped after retry failure: {exc}")
 
-                if (
-                    current_parts
-                    and current_words >= min_words
-                    and current_words + paragraph_words > max_words
-                ):
-                    chunks.append("\n\n".join(current_parts).strip())
-                    current_parts = [paragraph_part]
-                    current_words = paragraph_words
-                    continue
+        if response_text:
+            summaries.append(response_text)
 
-                if current_parts and current_words + paragraph_words > max_words:
-                    chunks.append("\n\n".join(current_parts).strip())
-                    current_parts = []
-                    current_words = 0
+    return summaries
 
-                current_parts.append(paragraph_part)
-                current_words += paragraph_words
 
-    if current_parts:
-        chunks.append("\n\n".join(current_parts).strip())
+def synthesise_chunk_summaries(
+    client: Any,
+    system_prompt: str,
+    summaries: list[str],
+    *,
+    temperature: float = CONTINUITY_TEMPERATURE,
+) -> str:
+    """Synthesize chunk summaries into one final global report."""
+    cleaned_summaries = [summary.strip() for summary in summaries if summary.strip()]
+    if not cleaned_summaries:
+        return ""
 
-    return [chunk for chunk in chunks if chunk]
+    if len(cleaned_summaries) == 1:
+        return cleaned_summaries[0]
+
+    synthesis_payload = "\n\n".join(
+        f"Chunk {index} summary:\n{summary}"
+        for index, summary in enumerate(cleaned_summaries, start=1)
+    )
+    return request_chat_completion(
+        client=client,
+        messages=[
+            {"role": "system", "content": system_prompt},
+            {"role": "user", "content": synthesis_payload},
+        ],
+        temperature=temperature,
+    )
+
+
+def run_full_novel_processor(
+    client: Any,
+    command_name: str,
+    chunk_system_prompt: str,
+    synthesis_system_prompt: str,
+    chunks: list[str],
+    *,
+    temperature: float = CONTINUITY_TEMPERATURE,
+) -> str:
+    """Run FULL_NOVEL_PROCESSOR chunk pass + synthesis + logging."""
+    summaries = process_chunks(
+        client=client,
+        system_prompt=chunk_system_prompt,
+        chunks=chunks,
+        temperature=temperature,
+    )
+
+    if not summaries:
+        write_full_novel_processor_log(command_name, len(chunks), False)
+        return ""
+
+    final_output = synthesise_chunk_summaries(
+        client=client,
+        system_prompt=synthesis_system_prompt,
+        summaries=summaries,
+        temperature=temperature,
+    )
+    success = bool(final_output.strip())
+    write_full_novel_processor_log(command_name, len(chunks), success)
+    return final_output
+
+
+def chunk_text_blocks(blocks: list[str], max_chars: int = 12000) -> list[str]:
+    """Group text blocks into bounded chunks for safer long-form analysis calls."""
+    return build_safe_chunks("\n\n".join(blocks), max_chars=max_chars)
+
+
+def split_manuscript_into_chunks(full_text: str) -> list[str]:
+    """Split manuscript text into safe bounded chunks for full-book analysis."""
+    return build_safe_chunks(full_text, max_chars=12000)
 
 
 def run_chunked_analysis(
@@ -1801,26 +1897,15 @@ def run_chunked_analysis(
     *,
     temperature: float = CONTINUITY_TEMPERATURE,
 ) -> str:
-    """Run isolated per-chunk analysis requests and return a final synthesis report."""
-    ordered_chunks = [chunk.strip() for chunk in chunks if chunk.strip()]
-    if not ordered_chunks:
+    """Backward-compatible wrapper around FULL_NOVEL_PROCESSOR helpers."""
+    summaries = process_chunks(
+        client=client,
+        system_prompt=system_prompt,
+        chunks=chunks,
+        temperature=temperature,
+    )
+    if not summaries:
         return ""
-
-    chunk_reports: list[str] = []
-    for chunk_index, chunk_text in enumerate(ordered_chunks, start=1):
-        print(f"Analyzing chunk {chunk_index}/{len(ordered_chunks)}...")
-        chunk_report = request_chat_completion(
-            client=client,
-            messages=[
-                {"role": "system", "content": system_prompt},
-                {"role": "user", "content": chunk_text},
-            ],
-            temperature=temperature,
-        )
-        chunk_reports.append(chunk_report)
-
-    if len(chunk_reports) == 1:
-        return chunk_reports[0]
 
     synthesis_system_prompt = (
         "You are combining multiple analysis reports into one final coherent report.\n\n"
@@ -1832,18 +1917,13 @@ def run_chunked_analysis(
         "- Do NOT invent new issues\n"
         "- Do NOT give writing advice unless original command allows it."
     )
-    synthesis_payload = "\n\n".join(
-        f"Chunk {index} report:\n{chunk_report}"
-        for index, chunk_report in enumerate(chunk_reports, start=1)
-    )
-    return request_chat_completion(
+    return synthesise_chunk_summaries(
         client=client,
-        messages=[
-            {"role": "system", "content": synthesis_system_prompt},
-            {"role": "user", "content": synthesis_payload},
-        ],
+        system_prompt=synthesis_system_prompt,
+        summaries=summaries,
         temperature=temperature,
     )
+
 
 
 def warn_for_missing_chapter_files(chapter_paths: list[Path]) -> None:
@@ -2653,6 +2733,39 @@ def extract_memory_suggestions_for_text(
     return parse_memory_suggestions(result)
 
 
+def extract_memory_suggestions_for_large_text(
+    client: Any,
+    scene_text: str,
+) -> list[tuple[int, str, str]]:
+    """Extract canon suggestions from very large chapter text using safe chunking."""
+    chunks = build_safe_chunks(scene_text, max_chars=12000)
+    if not chunks:
+        return []
+
+    if len(chunks) == 1:
+        return extract_memory_suggestions_for_text(client=client, scene_text=chunks[0])
+
+    chunk_reports = process_chunks(
+        client=client,
+        system_prompt=SCENE_SYSTEM_PROMPT,
+        chunks=chunks,
+        temperature=SCENE_TEMPERATURE,
+    )
+
+    merged: list[tuple[int, str, str]] = []
+    for report in chunk_reports:
+        parsed = parse_memory_suggestions(report)
+        for _, fact_text, category in parsed:
+            if any(
+                existing_category == category and facts_are_similar(existing_fact, fact_text)
+                for _, existing_fact, existing_category in merged
+            ):
+                continue
+            merged.append((len(merged) + 1, fact_text, category))
+
+    return merged
+
+
 def generate_scene_summary_for_chapter(
     client: Any,
     chapter_number: int,
@@ -2882,16 +2995,9 @@ def handle_book_integrity(client: Any) -> None:
         print("No chapter files found in ~/writing/novel_project/chapters/")
         return
 
-    chapter_blocks: list[str] = []
-    for chapter_path in chapter_paths:
-        chapter_number = extract_chapter_number(chapter_path)
-        if chapter_number is None:
-            continue
-        chapter_text = clean_terminal_text(chapter_path.read_text(encoding="utf-8"))
-        chapter_blocks.append(f"CHAPTER {chapter_number}\n\n{chapter_text}")
-
+    chapter_blocks = load_all_chapters()
     manuscript_text = "\n\n".join(chapter_blocks).strip()
-    chunked_blocks = split_manuscript_into_chunks(manuscript_text)
+    chunked_blocks = build_safe_chunks(manuscript_text)
     if not chunked_blocks:
         print("No chapter text found.")
         return
@@ -2912,9 +3018,20 @@ def handle_book_integrity(client: Any) -> None:
             )
             for chunk_text in chunked_blocks
         ]
-        report = run_chunked_analysis(
+        report = run_full_novel_processor(
             client=client,
-            system_prompt=BOOK_INTEGRITY_SYSTEM_PROMPT,
+            command_name="/book-integrity",
+            chunk_system_prompt=BOOK_INTEGRITY_SYSTEM_PROMPT,
+            synthesis_system_prompt=(
+                "You are combining multiple analysis reports into one final coherent report.\n\n"
+                "Rules:\n"
+                "- Remove duplicate issues\n"
+                "- Merge similar findings\n"
+                "- Preserve factual accuracy\n"
+                "- Maintain bullet structure\n"
+                "- Do NOT invent new issues\n"
+                "- Do NOT give writing advice unless original command allows it."
+            ),
             chunks=analysis_chunks,
             temperature=CONTINUITY_TEMPERATURE,
         )
@@ -2979,81 +3096,39 @@ def handle_world_consistency(client: Any) -> None:
         print("No chapter files found in ~/writing/novel_project/chapters/")
         return
 
-    chapter_blocks: list[str] = []
-    for chapter_path in chapter_paths:
-        chapter_number = extract_chapter_number(chapter_path)
-        if chapter_number is None:
-            continue
-        try:
-            chapter_text = clean_terminal_text(chapter_path.read_text(encoding="utf-8")).strip()
-        except OSError as exc:
-            print(f"Could not read {chapter_path.name}: {exc}")
-            return
-        if not chapter_text:
-            continue
-        chapter_blocks.append(f"CHAPTER {chapter_number}\n\n{chapter_text}")
+    chapter_blocks = load_all_chapters()
 
     if not chapter_blocks:
         print("No chapter text found.")
         return
 
-    chunk_blocks = chunk_text_blocks(chapter_blocks, max_chars=10000)
+    chunk_blocks = [
+        (
+            f"Canon memory:\n\n{canon_memory}\n\n"
+            f"World rules:\n\n{world_rules}\n\n"
+            f"Novel chunk:\n\n{chunk_text}"
+        )
+        for chunk_text in build_safe_chunks("\n\n".join(chapter_blocks), max_chars=10000)
+    ]
     if not chunk_blocks:
         print("No chapter text found.")
         return
 
-    chunk_reports: list[str] = []
     try:
-        for chunk_index, chunk_text in enumerate(chunk_blocks, start=1):
-            print(f"Analyzing chunk {chunk_index}/{len(chunk_blocks)}...")
-            chunk_report = request_chat_completion(
-                client=client,
-                messages=[
-                    {"role": "system", "content": WORLD_CONSISTENCY_CHUNK_SYSTEM_PROMPT},
-                    {
-                        "role": "user",
-                        "content": (
-                            f"Canon memory:\n\n{canon_memory}\n\n"
-                            f"World rules:\n\n{world_rules}\n\n"
-                            f"Novel chunk:\n\n{chunk_text}"
-                        ),
-                    },
-                ],
-                temperature=CONTINUITY_TEMPERATURE,
-            ).strip()
-            chunk_reports.append(chunk_report)
+        final_report = run_full_novel_processor(
+            client=client,
+            command_name="/world-consistency",
+            chunk_system_prompt=WORLD_CONSISTENCY_CHUNK_SYSTEM_PROMPT,
+            synthesis_system_prompt=WORLD_CONSISTENCY_SYNTHESIS_SYSTEM_PROMPT,
+            chunks=chunk_blocks,
+            temperature=CONTINUITY_TEMPERATURE,
+        ).strip()
     except Exception as exc:  # Keep terminal app stable for the user.
         print(f"World consistency audit failed: {exc}")
         return
 
-    issue_notes = [
-        report
-        for report in chunk_reports
-        if report and report.strip() != "NO WORLD ISSUES IN THIS CHUNK"
-    ]
-
-    if not issue_notes:
-        print()
-        print("WORLD CONSISTENCY REPORT")
-        print()
-        print("World logic remains consistent.")
-        return
-
-    synthesis_payload = "\n\n".join(
-        f"Chunk {index} findings:\n{report}"
-        for index, report in enumerate(issue_notes, start=1)
-    )
-    try:
-        final_report = request_chat_completion(
-            client=client,
-            messages=[
-                {"role": "system", "content": WORLD_CONSISTENCY_SYNTHESIS_SYSTEM_PROMPT},
-                {"role": "user", "content": synthesis_payload},
-            ],
-            temperature=CONTINUITY_TEMPERATURE,
-        ).strip()
-    except Exception as exc:  # Keep terminal app stable for the user.
-        print(f"World consistency synthesis failed: {exc}")
+    if not final_report:
+        print("World consistency audit failed: no chunk summaries produced.")
         return
 
     print()
@@ -3091,80 +3166,38 @@ def handle_character_consistency(client: Any) -> None:
         print("No chapter files found in ~/writing/novel_project/chapters/")
         return
 
-    chapter_blocks: list[str] = []
-    for chapter_path in chapter_paths:
-        chapter_number = extract_chapter_number(chapter_path)
-        if chapter_number is None:
-            continue
-        try:
-            chapter_text = clean_terminal_text(chapter_path.read_text(encoding="utf-8")).strip()
-        except OSError as exc:
-            print(f"Could not read {chapter_path.name}: {exc}")
-            return
-        if not chapter_text:
-            continue
-        chapter_blocks.append(f"CHAPTER {chapter_number}\n\n{chapter_text}")
+    chapter_blocks = load_all_chapters()
 
     if not chapter_blocks:
         print("No chapter text found.")
         return
 
-    chunk_blocks = chunk_text_blocks(chapter_blocks, max_chars=10000)
+    chunk_blocks = [
+        (
+            f"Canon memory:\n\n{canon_memory}\n\n"
+            f"Novel chunk:\n\n{chunk_text}"
+        )
+        for chunk_text in build_safe_chunks("\n\n".join(chapter_blocks), max_chars=10000)
+    ]
     if not chunk_blocks:
         print("No chapter text found.")
         return
 
-    chunk_reports: list[str] = []
     try:
-        for chunk_index, chunk_text in enumerate(chunk_blocks, start=1):
-            print(f"Analyzing chunk {chunk_index}/{len(chunk_blocks)}...")
-            chunk_report = request_chat_completion(
-                client=client,
-                messages=[
-                    {"role": "system", "content": CHARACTER_CONSISTENCY_CHUNK_SYSTEM_PROMPT},
-                    {
-                        "role": "user",
-                        "content": (
-                            f"Canon memory:\n\n{canon_memory}\n\n"
-                            f"Novel chunk:\n\n{chunk_text}"
-                        ),
-                    },
-                ],
-                temperature=CONTINUITY_TEMPERATURE,
-            ).strip()
-            chunk_reports.append(chunk_report)
+        final_report = run_full_novel_processor(
+            client=client,
+            command_name="/character-consistency",
+            chunk_system_prompt=CHARACTER_CONSISTENCY_CHUNK_SYSTEM_PROMPT,
+            synthesis_system_prompt=CHARACTER_CONSISTENCY_SYNTHESIS_SYSTEM_PROMPT,
+            chunks=chunk_blocks,
+            temperature=CONTINUITY_TEMPERATURE,
+        ).strip()
     except Exception as exc:  # Keep terminal app stable for the user.
         print(f"Character consistency audit failed: {exc}")
         return
 
-    issue_notes = [
-        report
-        for report in chunk_reports
-        if report and report.strip() != "NO CHARACTER ISSUES IN THIS CHUNK"
-    ]
-
-    if not issue_notes:
-        print()
-        print("CHARACTER CONSISTENCY REPORT")
-        print()
-        print("Character behaviour remains consistent.")
-        return
-
-    synthesis_payload = "\n\n".join(
-        f"Chunk {index} findings:\n{report}"
-        for index, report in enumerate(issue_notes, start=1)
-    )
-    try:
-        final_report = request_chat_completion(
-            client=client,
-            messages=[
-                {"role": "system", "content": CHARACTER_CONSISTENCY_SYNTHESIS_SYSTEM_PROMPT},
-                {"role": "user", "content": synthesis_payload},
-            ],
-            temperature=CONTINUITY_TEMPERATURE,
-        ).strip()
-    except Exception as exc:  # Keep terminal app stable for the user.
-        print(f"Character consistency synthesis failed: {exc}")
+    if not final_report:
+        print("Character consistency audit failed: no chunk summaries produced.")
         return
 
     print()
@@ -3224,7 +3257,7 @@ def handle_rebuild_memory(client: Any, command_text: str = "") -> None:
 
             print(f"Processing chapter {chapter_number}...")
             try:
-                suggestions = extract_memory_suggestions_for_text(
+                suggestions = extract_memory_suggestions_for_large_text(
                     client=client,
                     scene_text=chapter_path.read_text(encoding="utf-8").strip(),
                 )
@@ -3704,15 +3737,8 @@ def handle_draft_pass(client: Any, command_text: str = "") -> None:
             print("No chapter files found.")
             return
 
-        chapter_blocks = []
-        for chapter_path in chapter_paths:
-            chapter_number = extract_chapter_number(chapter_path)
-            if chapter_number is None:
-                continue
-            chapter_text = clean_terminal_text(chapter_path.read_text(encoding="utf-8"))
-            chapter_blocks.append(f"CHAPTER {chapter_number}\n\n{chapter_text}")
-
-        chapter_chunks = split_manuscript_into_chunks("\n\n".join(chapter_blocks))
+        chapter_blocks = load_all_chapters()
+        chapter_chunks = build_safe_chunks("\n\n".join(chapter_blocks))
         if not chapter_chunks:
             print("No chapter text found.")
             return
@@ -3731,9 +3757,20 @@ def handle_draft_pass(client: Any, command_text: str = "") -> None:
                 dimension_name=dimension_name,
                 dimension_instructions=dimension_instructions,
             )
-            result = run_chunked_analysis(
+            result = run_full_novel_processor(
                 client=client,
-                system_prompt=draft_system_prompt,
+                command_name="/draft-pass full",
+                chunk_system_prompt=draft_system_prompt,
+                synthesis_system_prompt=(
+                    "You are combining multiple analysis reports into one final coherent report.\n\n"
+                    "Rules:\n"
+                    "- Remove duplicate issues\n"
+                    "- Merge similar findings\n"
+                    "- Preserve factual accuracy\n"
+                    "- Maintain bullet structure\n"
+                    "- Do NOT invent new issues\n"
+                    "- Do NOT give writing advice unless original command allows it."
+                ),
                 chunks=chapter_chunks,
                 temperature=DRAFT_PASS_TEMPERATURE,
             )
