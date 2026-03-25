@@ -5103,6 +5103,315 @@ def print_welcome() -> None:
     print("Type /help for commands or type exit to quit.")
 
 
+ALL_COMMANDS = [
+    "/scene-summary",
+    "/proofread",
+    "/rebuild-memory",
+    "/continuity-check",
+    "/story-state",
+    "/timeline-view",
+    "/chapter-summary",
+    "/ideas",
+    "/idea-resurface",
+    "/world-add",
+    "/draft-save",
+    "/draft-list",
+    "/draft-load",
+    "/draft-pass",
+    "/book-integrity",
+    "/build-book",
+    "/export-book --docx",
+    "/world-consistency",
+    "/character-consistency",
+    "/recap",
+    "/research-topic",
+    "/research-scene",
+    "/research-apply",
+    "/research-integrity",
+    "/help",
+    "/help --workflow",
+    "/help --when",
+    "/help --system-health",
+    "/help --describe",
+    "exit",
+]
+
+
+COMMAND_HELP = {
+    "/scene-summary": """Purpose: Analyse a pasted scene and extract continuity-critical memory suggestions and story-state changes.
+Files read: Canon memory, recent scene summaries, screenplay source (if present), and user-pasted scene text.
+Files written: Canon memory, story state memory, scene summaries, and chapter files when user confirms updates.
+AI usage: Yes.
+Canon memory impact: Can append, resolve, or update canon facts and state-tracking entries.
+Manuscript impact: May save chapter text updates when user chooses to persist generated/edited chapter content.
+Safety level: Modifies data.
+When to use: After drafting a substantial scene to keep memory and continuity synchronized.""",
+    "/proofread": """Purpose: Proofread pasted text for grammar, punctuation, and clarity without changing core meaning.
+Files read: User-pasted text only.
+Files written: None by default.
+AI usage: Yes.
+Canon memory impact: None.
+Manuscript impact: None unless user manually applies suggestions elsewhere.
+Safety level: Safe.
+When to use: Immediately after writing a scene/chapter draft before continuity processing.""",
+    "/rebuild-memory": """Purpose: Reconstruct canon memory from existing chapter files after major edits.
+Files read: Chapter files, existing canon memory, and related project memory artifacts.
+Files written: Canon memory, story state memory, timeline threads, scene summaries, and rebuild logs.
+AI usage: Yes.
+Canon memory impact: Replaces and rebuilds canonical continuity records.
+Manuscript impact: Does not edit manuscript prose directly.
+Safety level: Modifies data.
+When to use: After large rewrites, chapter reordering, or memory drift concerns.""",
+    "/continuity-check": """Purpose: Compare selected chapter content against memory/context to detect factual continuity issues.
+Files read: Canon memory, selected chapter text, and nearby chapter context.
+Files written: Continuity report file.
+AI usage: Yes.
+Canon memory impact: None.
+Manuscript impact: None.
+Safety level: Safe.
+When to use: Before locking a chapter or progressing to the next chapter.""",
+    "/story-state": """Purpose: Display current persistent unresolved and resolved narrative pressure states.
+Files read: Story state memory file.
+Files written: None.
+AI usage: No.
+Canon memory impact: None.
+Manuscript impact: None.
+Safety level: Safe.
+When to use: When you need fast orientation on active narrative pressure.""",
+    "/timeline-view": """Purpose: Display timeline-oriented continuity entries in chronological-style view.
+Files read: Canon memory and timeline-thread memory files.
+Files written: None.
+AI usage: No.
+Canon memory impact: None.
+Manuscript impact: None.
+Safety level: Safe.
+When to use: When sequence, timing, or event order is unclear.""",
+    "/chapter-summary": """Purpose: Summarize a selected chapter’s key movement and outcomes.
+Files read: Chapter file selected by the user.
+Files written: None.
+AI usage: Yes.
+Canon memory impact: None.
+Manuscript impact: None.
+Safety level: Safe.
+When to use: During revision planning and chapter-level structural review.""",
+    "/ideas": """Purpose: Save a raw idea note into persistent idea storage.
+Files read: Existing ideas file (if present).
+Files written: Ideas memory file.
+AI usage: No.
+Canon memory impact: None.
+Manuscript impact: None.
+Safety level: Modifies data.
+When to use: Any time you want to capture inspiration for later.""",
+    "/idea-resurface": """Purpose: Retrieve and rank previously saved ideas relevant to current context.
+Files read: Ideas memory file and optional user prompt text.
+Files written: None.
+AI usage: Yes.
+Canon memory impact: None.
+Manuscript impact: None.
+Safety level: Safe.
+When to use: When story progress stalls and prior idea inventory may help.""",
+    "/world-add": """Purpose: Append a confirmed world rule/fact to world memory storage.
+Files read: Existing world memory file.
+Files written: World memory file.
+AI usage: No.
+Canon memory impact: Adds persistent world canon notes.
+Manuscript impact: None.
+Safety level: Modifies data.
+When to use: After confirming stable world constraints you want consistently enforced.""",
+    "/draft-save": """Purpose: Save a timestamped backup snapshot of the manuscript.
+Files read: Current manuscript file.
+Files written: Draft/backup files.
+AI usage: No.
+Canon memory impact: None.
+Manuscript impact: Creates backup only; does not alter manuscript text.
+Safety level: Modifies data.
+When to use: Before risky edits or major rewrite passes.""",
+    "/draft-list": """Purpose: List available saved manuscript draft snapshots.
+Files read: Draft/backup directory contents.
+Files written: None.
+AI usage: No.
+Canon memory impact: None.
+Manuscript impact: None.
+Safety level: Safe.
+When to use: Before restoring or auditing backup history.""",
+    "/draft-load": """Purpose: Restore manuscript content from a selected draft snapshot.
+Files read: Draft/backup files.
+Files written: Manuscript file (restored content).
+AI usage: No.
+Canon memory impact: None.
+Manuscript impact: Overwrites current manuscript content with selected snapshot.
+Safety level: Destructive.
+When to use: When you need rollback to a known stable manuscript state.""",
+    "/draft-pass": """Purpose: Run focused AI revision diagnostics on manuscript text using a selected pass mode.
+Files read: Manuscript text and user-selected mode options.
+Files written: None.
+AI usage: Yes.
+Canon memory impact: None.
+Manuscript impact: None unless user manually applies recommendations.
+Safety level: Safe.
+When to use: During revision phases focused on structure, tension, or clarity.""",
+    "/book-integrity": """Purpose: Audit full manuscript for structural, continuity, arc, and tension integrity.
+Files read: Full manuscript and relevant continuity context.
+Files written: Book integrity report file.
+AI usage: Yes.
+Canon memory impact: None.
+Manuscript impact: None.
+Safety level: Safe.
+When to use: Periodically at major milestones or pre-distribution review.""",
+    "/build-book": """Purpose: Compile ordered chapter files into a single manuscript text artifact.
+Files read: Chapter files.
+Files written: Manuscript file.
+AI usage: No.
+Canon memory impact: None.
+Manuscript impact: Regenerates manuscript from chapters.
+Safety level: Modifies data.
+When to use: After chapter updates to produce a current full-book draft.""",
+    "/export-book --docx": """Purpose: Export manuscript/chapter compilation into DOCX format for sharing or submission.
+Files read: Chapter files or manuscript source used by exporter.
+Files written: DOCX export file in manuscript directory.
+AI usage: No.
+Canon memory impact: None.
+Manuscript impact: No source text changes; generates export artifact.
+Safety level: Modifies data.
+When to use: When preparing editor/agent/beta-reader distribution output.""",
+    "/world-consistency": """Purpose: Audit whole-book world-logic consistency in chunks and synthesize issues.
+Files read: Full manuscript/book text.
+Files written: World consistency report file.
+AI usage: Yes.
+Canon memory impact: None.
+Manuscript impact: None.
+Safety level: Safe.
+When to use: During continuity QA for setting, technology, and rules.""",
+    "/character-consistency": """Purpose: Audit character behaviour/motivation continuity across manuscript chunks.
+Files read: Full manuscript/book text.
+Files written: Character consistency report file.
+AI usage: Yes.
+Canon memory impact: None.
+Manuscript impact: None.
+Safety level: Safe.
+When to use: During revision when character logic drift is suspected.""",
+    "/recap": """Purpose: Generate a present-state orientation recap from current narrative context.
+Files read: Canon memory and story state context.
+Files written: None.
+AI usage: Yes.
+Canon memory impact: None.
+Manuscript impact: None.
+Safety level: Safe.
+When to use: When re-entering project context or resetting narrative focus.""",
+    "/research-topic": """Purpose: Run structured scientific research capture on a user-defined topic.
+Files read: User research prompt and existing research topic files (for conflict checks as applicable).
+Files written: Research topic files.
+AI usage: Yes.
+Canon memory impact: None.
+Manuscript impact: None.
+Safety level: Modifies data.
+When to use: Before writing scenes that require technical realism grounding.""",
+    "/research-scene": """Purpose: Evaluate pasted scene realism against scientific/engineering constraints.
+Files read: User-pasted scene and relevant research context.
+Files written: None.
+AI usage: Yes.
+Canon memory impact: None.
+Manuscript impact: None.
+Safety level: Safe.
+When to use: After drafting technically sensitive scenes.""",
+    "/research-apply": """Purpose: Apply saved research topics to evaluate a scene for realism conflicts.
+Files read: Stored research topics and user-pasted scene.
+Files written: None.
+AI usage: Yes.
+Canon memory impact: None.
+Manuscript impact: None.
+Safety level: Safe.
+When to use: During revision when strict alignment with saved research is required.""",
+    "/research-integrity": """Purpose: Cross-check stored research topics for internal contradiction.
+Files read: Research topic files.
+Files written: Research integrity report files.
+AI usage: Yes.
+Canon memory impact: None.
+Manuscript impact: None.
+Safety level: Modifies data.
+When to use: Before consolidating world rules that depend on multiple research topics.""",
+    "/help": """Purpose: Show available command list.
+Files read: None.
+Files written: None.
+AI usage: No.
+Canon memory impact: None.
+Manuscript impact: None.
+Safety level: Safe.
+When to use: Any time command discovery is needed.""",
+    "/help --workflow": """Purpose: Show static end-to-end workflow guidance for operational command cadence.
+Files read: None.
+Files written: None.
+AI usage: No.
+Canon memory impact: None.
+Manuscript impact: None.
+Safety level: Safe.
+When to use: When choosing workflow phase and tool order.""",
+    "/help --when": """Purpose: Show static per-command usage timing guidance.
+Files read: None.
+Files written: None.
+AI usage: No.
+Canon memory impact: None.
+Manuscript impact: None.
+Safety level: Safe.
+When to use: When deciding which command fits current writing situation.""",
+    "/help --system-health": """Purpose: Display local project health diagnostics and risk signals.
+Files read: Core project files/directories and memory/manuscript metadata.
+Files written: None.
+AI usage: No.
+Canon memory impact: None.
+Manuscript impact: None.
+Safety level: Safe.
+When to use: Before long sessions or when system/performance drift is suspected.""",
+    "/help --describe": """Purpose: Interactive static command manual lookup by numbered command selection.
+Files read: Built-in ALL_COMMANDS and COMMAND_HELP constants only.
+Files written: None.
+AI usage: No.
+Canon memory impact: None.
+Manuscript impact: None.
+Safety level: Safe.
+When to use: When you need precise operational behavior for a specific command.""",
+    "exit": """Purpose: Terminate the interactive assistant session.
+Files read: None.
+Files written: None.
+AI usage: No.
+Canon memory impact: None.
+Manuscript impact: None.
+Safety level: Safe.
+When to use: When ending the current terminal session.""",
+}
+
+
+def handle_help_describe() -> None:
+    """Interactively display static command documentation."""
+    print("COMMAND REFERENCE")
+    for index, command_name in enumerate(ALL_COMMANDS, start=1):
+        print(f"{index}. {command_name}")
+
+    try:
+        selection_text = input("\nSelect command number: ").strip()
+    except (EOFError, KeyboardInterrupt):
+        print("\nCancelled.")
+        return
+
+    if not selection_text.isdigit():
+        print("Invalid selection.")
+        return
+
+    selection_index = int(selection_text)
+    if selection_index < 1 or selection_index > len(ALL_COMMANDS):
+        print("Invalid selection.")
+        return
+
+    selected_command = ALL_COMMANDS[selection_index - 1]
+    description = COMMAND_HELP.get(selected_command)
+    if not description:
+        print("Description not available.")
+        return
+
+    print()
+    print(selected_command)
+    print(description)
+
 
 def print_help() -> None:
     """Show available commands."""
@@ -5143,6 +5452,7 @@ def print_help() -> None:
     print("SYSTEM")
     print("/novel-stats")
     print("/help --system-health")
+    print("/help --describe")
     print("/help --workflow")
     print("/help --when")
     print("/help")
@@ -5642,6 +5952,7 @@ def main() -> None:
         "/export-book": handle_export_book,
         "/novel-stats": lambda command_text="": handle_novel_stats(),
         "/help --system-health": lambda command_text="": handle_system_health(),
+        "/help --describe": lambda command_text="": handle_help_describe(),
         "/help --workflow": lambda command_text="": handle_help_workflow(),
         "/help --when": lambda command_text="": handle_help_when(),
         "/help": lambda command_text="": print_help(),
