@@ -5,6 +5,10 @@ import re
 import inspect
 import math
 import shutil
+import itertools
+import sys
+import threading
+import time
 from collections import Counter, OrderedDict
 from copy import deepcopy
 from datetime import datetime, timedelta
@@ -1917,7 +1921,7 @@ def process_chunks(
     ordered_chunks = [chunk.strip() for chunk in chunks if chunk.strip()]
 
     for chunk_index, chunk_text in enumerate(ordered_chunks, start=1):
-        print(f"Processing chunk {chunk_index} / {len(ordered_chunks)}")
+        print(f"[Processing chunk {chunk_index}/{len(ordered_chunks)}]")
         response_text = ""
         for attempt in range(2):
             try:
@@ -1992,7 +1996,7 @@ def run_full_novel_processor(
 
     extracted_chunks: list[str] = []
     for chunk_index, chunk_text in enumerate(ordered_chunks, start=1):
-        print(f"Processing chunk {chunk_index} / {len(ordered_chunks)}")
+        print(f"[Processing chunk {chunk_index}/{len(ordered_chunks)}]")
         stage_start = perf_counter()
         extraction_prompt = build_extraction_prompt(chunk_text)
         try:
@@ -2036,6 +2040,7 @@ def run_full_novel_processor(
     log_pipeline_stage_timing(f"{command_name}:reasoning_synthesis", perf_counter() - reasoning_start)
 
     final_start = perf_counter()
+    print("[Final synthesis stage]")
     final_prompt = build_final_analysis_prompt(
         reasoning_report=reasoning_report,
         user_prompt=synthesis_system_prompt,
@@ -2565,6 +2570,30 @@ def create_client() -> Any:
     return OpenAI()
 
 
+def start_spinner(message: str = "Thinking") -> tuple[dict[str, bool], threading.Thread]:
+    """Start a simple terminal spinner in a background thread."""
+    stop_flag = {"stop": False}
+
+    def spin() -> None:
+        for char in itertools.cycle("|/-\\"):
+            if stop_flag["stop"]:
+                break
+            sys.stdout.write(f"\r{message} {char}")
+            sys.stdout.flush()
+            time.sleep(0.1)
+
+    thread = threading.Thread(target=spin, daemon=True)
+    thread.start()
+    return stop_flag, thread
+
+
+def stop_spinner(stop_flag: dict[str, bool], thread: threading.Thread) -> None:
+    """Stop a running spinner thread and clear the spinner line."""
+    stop_flag["stop"] = True
+    thread.join()
+    sys.stdout.write("\r")
+    sys.stdout.flush()
+
 
 def call_ai(
     task_type: str,
@@ -2576,6 +2605,7 @@ def call_ai(
     """Route AI requests to a model by task type with fallback safety."""
     resolved_task_type = task_type if task_type in MODEL_ROUTER else DEFAULT_TASK_TYPE
     model = MODEL_ROUTER[resolved_task_type]
+    print(f"[AI model: {model}]")
     resolved_temperature = (
         temperature
         if temperature is not None
@@ -2587,23 +2617,28 @@ def call_ai(
         "temperature": resolved_temperature,
     }
 
+    stop_flag, spinner_thread = start_spinner("AI processing")
     try:
-        response = client.responses.create(**request_kwargs)
-        return response.output_text
-    except Exception:
-        fallback_model = MODEL_ROUTER[DEFAULT_TASK_TYPE]
-        fallback_temperature = (
-            temperature
-            if temperature is not None
-            else TEMPERATURE_ROUTER.get(DEFAULT_TASK_TYPE, 0.2)
-        )
-        fallback_kwargs: dict[str, Any] = {
-            "model": fallback_model,
-            "input": prompt,
-            "temperature": fallback_temperature,
-        }
-        fallback = client.responses.create(**fallback_kwargs)
-        return fallback.output_text
+        try:
+            response = client.responses.create(**request_kwargs)
+            return response.output_text
+        except Exception:
+            fallback_model = MODEL_ROUTER[DEFAULT_TASK_TYPE]
+            print(f"[AI model: {fallback_model}]")
+            fallback_temperature = (
+                temperature
+                if temperature is not None
+                else TEMPERATURE_ROUTER.get(DEFAULT_TASK_TYPE, 0.2)
+            )
+            fallback_kwargs: dict[str, Any] = {
+                "model": fallback_model,
+                "input": prompt,
+                "temperature": fallback_temperature,
+            }
+            fallback = client.responses.create(**fallback_kwargs)
+            return fallback.output_text
+    finally:
+        stop_spinner(stop_flag, spinner_thread)
 
 
 def request_chat_completion(
@@ -2733,6 +2768,7 @@ def run_analysis_pipeline(
 
     # Stage 3 — Final Analysis
     stage_start = perf_counter()
+    print("[Final synthesis stage]")
     final_prompt = build_final_analysis_prompt(reasoning_report, user_prompt)
     try:
         final_output = call_ai(
@@ -2776,7 +2812,8 @@ def run_chunked_analysis_pipeline(
     chunks = split_manuscript_into_chunks(raw_text)
     extracted_blocks: list[str] = []
 
-    for chunk in chunks:
+    for chunk_index, chunk in enumerate(chunks, start=1):
+        print(f"[Processing chunk {chunk_index}/{len(chunks)}]")
         extraction_prompt = build_extraction_prompt(chunk)
         extracted = call_ai(
             "canon_extract",
@@ -2802,6 +2839,7 @@ def run_chunked_analysis_pipeline(
         reasoning_report = merged_extraction
     reasoning_report = truncate_for_pipeline(reasoning_report, MAX_PIPELINE_REASONING_CHARS)
 
+    print("[Final synthesis stage]")
     final_prompt = build_final_analysis_prompt(reasoning_report, user_prompt)
     final_output = ""
     for task_type in ("book_analysis", "logic_audit", "canon_extract"):
@@ -5354,7 +5392,7 @@ def handle_research_scene(client: Any) -> None:
         prior_findings = ""
         for chunk_index, scene_chunk in enumerate(scene_chunks, start=1):
             if len(scene_chunks) > 1:
-                print(f"Analyzing chunk {chunk_index}/{len(scene_chunks)}...")
+                print(f"[Processing chunk {chunk_index}/{len(scene_chunks)}]")
             chunk_report = request_chat_completion(
                 client=client,
                 messages=build_research_scene_messages(
