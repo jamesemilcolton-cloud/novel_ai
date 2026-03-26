@@ -105,6 +105,32 @@ DEFAULT_ANALYSIS_CHUNK_WORDS = 6000
 MAX_PIPELINE_EXTRACTION_CHARS = 12000
 MAX_PIPELINE_REASONING_CHARS = 16000
 
+# Developer architecture note:
+# - All future large-scale analysis must use run_chunked_analysis_pipeline().
+# - Router usage through call_ai() is mandatory for all model requests.
+# - Chunk size adapts dynamically for session-level optimisation.
+# - Telemetry persists through session runtime for optimisation and diagnostics.
+SYSTEM_TELEMETRY = {
+    "extraction_times": [],
+    "reasoning_times": [],
+    "final_times": [],
+    "total_commands": 0,
+    "longest_command": 0.0,
+}
+CHUNK_OPTIMISER = {
+    "current_size": 6000,
+    "min_size": 2500,
+    "max_size": 12000,
+    "history": [],
+}
+LAST_PIPELINE_STATS = {
+    "used_fallback": False,
+    "chunk_count": 0,
+    "extraction_time": 0.0,
+    "reasoning_time": 0.0,
+    "final_time": 0.0,
+}
+
 MAIN_SYSTEM_PROMPT = """You are a thoughtful AI novel-writing assistant.
 Help the user think through story ideas, scenes, structure, tone, character, and prose.
 Use the provided memory carefully and naturally.
@@ -1884,6 +1910,69 @@ def split_text_by_word_count(text: str, max_words: int = DEFAULT_ANALYSIS_CHUNK_
     return chunks
 
 
+def print_chunk_progress_bar(current: int, total: int, width: int = 28) -> None:
+    """Render an inline ASCII progress bar for chunk processing."""
+    safe_total = max(total, 1)
+    ratio = min(max(current / safe_total, 0.0), 1.0)
+    filled = int(width * ratio)
+    bar = "#" * filled + "-" * (width - filled)
+    print(f"[{bar}] {current}/{safe_total}")
+
+
+def get_adaptive_chunk_size() -> int:
+    """Return the current adaptive chunk size."""
+    current = int(CHUNK_OPTIMISER.get("current_size", DEFAULT_ANALYSIS_CHUNK_WORDS))
+    return max(CHUNK_OPTIMISER["min_size"], min(CHUNK_OPTIMISER["max_size"], current))
+
+
+def adapt_chunk_size() -> None:
+    """Learn chunk sizing from extraction timing history and print next target."""
+    history = CHUNK_OPTIMISER["history"][-6:]
+    if not history:
+        print(f"[Chunk optimiser] size remains {CHUNK_OPTIMISER['current_size']} words")
+        return
+
+    average_chunk_time = sum(history) / len(history)
+    current_size = get_adaptive_chunk_size()
+    if average_chunk_time > 7.0:
+        current_size = max(CHUNK_OPTIMISER["min_size"], int(current_size * 0.9))
+    elif average_chunk_time < 2.5:
+        current_size = min(CHUNK_OPTIMISER["max_size"], int(current_size * 1.1))
+
+    CHUNK_OPTIMISER["current_size"] = current_size
+    print(
+        f"[Chunk optimiser] avg chunk extraction {average_chunk_time:.2f}s -> "
+        f"new chunk size {current_size} words"
+    )
+
+
+def calculate_confidence() -> float:
+    """Calculate AI confidence score from fallback usage, chunking, and stage timings."""
+    fallback_penalty = 0.2 if LAST_PIPELINE_STATS.get("used_fallback") else 0.0
+    chunk_count = max(int(LAST_PIPELINE_STATS.get("chunk_count", 0)), 1)
+    chunk_penalty = min(0.18, (chunk_count - 1) * 0.02)
+    extraction = float(LAST_PIPELINE_STATS.get("extraction_time", 0.0))
+    reasoning = float(LAST_PIPELINE_STATS.get("reasoning_time", 0.0))
+    final = float(LAST_PIPELINE_STATS.get("final_time", 0.0))
+    total = extraction + reasoning + final
+    timing_penalty = 0.0
+    if total > 0:
+        final_ratio = final / total
+        reasoning_ratio = reasoning / total
+        if final_ratio > 0.7:
+            timing_penalty += 0.08
+        if reasoning_ratio < 0.15:
+            timing_penalty += 0.06
+    confidence = max(0.0, min(1.0, 1.0 - fallback_penalty - chunk_penalty - timing_penalty))
+    return confidence
+
+
+def print_pipeline_confidence() -> None:
+    """Print confidence score after pipeline report output."""
+    confidence = calculate_confidence() * 100
+    print(f"AI confidence score: {confidence:.1f}%")
+
+
 def print_large_manuscript_warning_if_needed(text: str) -> None:
     """Warn when manuscript enters large-novel scale processing."""
     if len(clean_terminal_text(text).split()) > 90000:
@@ -2082,7 +2171,7 @@ def chunk_text_blocks(blocks: list[str], max_chars: int = 12000) -> list[str]:
 
 def split_manuscript_into_chunks(full_text: str) -> list[str]:
     """Split manuscript text into safe bounded chunks for full-book analysis."""
-    return split_text_by_word_count(full_text, max_words=DEFAULT_ANALYSIS_CHUNK_WORDS)
+    return split_text_by_word_count(full_text, max_words=get_adaptive_chunk_size())
 
 
 def run_chunked_analysis(
@@ -2570,26 +2659,28 @@ def create_client() -> Any:
     return OpenAI()
 
 
-def start_spinner(message: str = "Thinking") -> tuple[dict[str, bool], threading.Thread]:
-    """Start a simple terminal spinner in a background thread."""
-    stop_flag = {"stop": False}
+def start_spinner(message: str = "Thinking") -> tuple[threading.Event, threading.Thread]:
+    """Start a thread-safe terminal spinner in a background thread."""
+    stop_event = threading.Event()
 
     def spin() -> None:
         for char in itertools.cycle("|/-\\"):
-            if stop_flag["stop"]:
+            if stop_event.is_set():
                 break
             sys.stdout.write(f"\r{message} {char}")
             sys.stdout.flush()
             time.sleep(0.1)
+        sys.stdout.write("\r")
+        sys.stdout.flush()
 
-    thread = threading.Thread(target=spin, daemon=True)
+    thread = threading.Thread(target=spin, daemon=True, name="novel-ai-spinner")
     thread.start()
-    return stop_flag, thread
+    return stop_event, thread
 
 
-def stop_spinner(stop_flag: dict[str, bool], thread: threading.Thread) -> None:
+def stop_spinner(stop_event: threading.Event, thread: threading.Thread) -> None:
     """Stop a running spinner thread and clear the spinner line."""
-    stop_flag["stop"] = True
+    stop_event.set()
     thread.join()
     sys.stdout.write("\r")
     sys.stdout.flush()
@@ -2604,41 +2695,46 @@ def call_ai(
 ) -> str:
     """Route AI requests to a model by task type with fallback safety."""
     resolved_task_type = task_type if task_type in MODEL_ROUTER else DEFAULT_TASK_TYPE
-    model = MODEL_ROUTER[resolved_task_type]
-    print(f"[AI model: {model}]")
+    model_chain = [MODEL_ROUTER[resolved_task_type]]
+    if resolved_task_type == "book_analysis":
+        for fallback_task in ("logic_audit", "canon_extract"):
+            fallback_model = MODEL_ROUTER[fallback_task]
+            if fallback_model not in model_chain:
+                model_chain.append(fallback_model)
+
     resolved_temperature = (
         temperature
         if temperature is not None
         else TEMPERATURE_ROUTER.get(resolved_task_type, 0.2)
     )
-    request_kwargs: dict[str, Any] = {
-        "model": model,
-        "input": prompt,
-        "temperature": resolved_temperature,
-    }
-
-    stop_flag, spinner_thread = start_spinner("AI processing")
+    stop_event, spinner_thread = start_spinner("AI processing")
+    used_fallback = False
     try:
-        try:
-            response = client.responses.create(**request_kwargs)
-            return response.output_text
-        except Exception:
-            fallback_model = MODEL_ROUTER[DEFAULT_TASK_TYPE]
-            print(f"[AI model: {fallback_model}]")
-            fallback_temperature = (
-                temperature
-                if temperature is not None
-                else TEMPERATURE_ROUTER.get(DEFAULT_TASK_TYPE, 0.2)
-            )
-            fallback_kwargs: dict[str, Any] = {
-                "model": fallback_model,
+        last_exception: Exception | None = None
+        for index, model in enumerate(model_chain):
+            print(f"[AI model: {model}]")
+            if index > 0:
+                used_fallback = True
+                print(f"[Fallback engaged -> {model}]")
+            request_kwargs: dict[str, Any] = {
+                "model": model,
                 "input": prompt,
-                "temperature": fallback_temperature,
+                "temperature": resolved_temperature,
             }
-            fallback = client.responses.create(**fallback_kwargs)
-            return fallback.output_text
+            try:
+                response = client.responses.create(**request_kwargs)
+                LAST_PIPELINE_STATS["used_fallback"] = bool(
+                    LAST_PIPELINE_STATS.get("used_fallback", False) or used_fallback
+                )
+                return response.output_text
+            except Exception as exc:
+                last_exception = exc
+                continue
+        if last_exception is not None:
+            raise last_exception
+        raise RuntimeError("AI call failed without response.")
     finally:
-        stop_spinner(stop_flag, spinner_thread)
+        stop_spinner(stop_event, spinner_thread)
 
 
 def request_chat_completion(
@@ -2731,6 +2827,15 @@ def run_analysis_pipeline(
     temperature: float | None = None,
 ) -> str:
     """Run extraction -> reasoning -> final analysis pipeline with graceful fallbacks."""
+    LAST_PIPELINE_STATS.update(
+        {
+            "used_fallback": False,
+            "chunk_count": 1,
+            "extraction_time": 0.0,
+            "reasoning_time": 0.0,
+            "final_time": 0.0,
+        }
+    )
     # Backward-compatible single-block staged pipeline.
     # Stage 1 — Extraction
     stage_start = perf_counter()
@@ -2747,7 +2852,10 @@ def run_analysis_pipeline(
     if not extracted:
         extracted = raw_text
     extracted = truncate_for_pipeline(extracted, MAX_PIPELINE_EXTRACTION_CHARS)
-    log_pipeline_stage_timing("extraction", perf_counter() - stage_start)
+    extraction_elapsed = perf_counter() - stage_start
+    log_pipeline_stage_timing("extraction", extraction_elapsed)
+    SYSTEM_TELEMETRY["extraction_times"].append(extraction_elapsed)
+    LAST_PIPELINE_STATS["extraction_time"] = extraction_elapsed
 
     # Stage 2 — Reasoning
     stage_start = perf_counter()
@@ -2764,7 +2872,10 @@ def run_analysis_pipeline(
     if not reasoning_report:
         reasoning_report = extracted
     reasoning_report = truncate_for_pipeline(reasoning_report, MAX_PIPELINE_REASONING_CHARS)
-    log_pipeline_stage_timing("reasoning", perf_counter() - stage_start)
+    reasoning_elapsed = perf_counter() - stage_start
+    log_pipeline_stage_timing("reasoning", reasoning_elapsed)
+    SYSTEM_TELEMETRY["reasoning_times"].append(reasoning_elapsed)
+    LAST_PIPELINE_STATS["reasoning_time"] = reasoning_elapsed
 
     # Stage 3 — Final Analysis
     stage_start = perf_counter()
@@ -2797,7 +2908,10 @@ def run_analysis_pipeline(
             client=client,
             temperature=temperature,
         ).strip()
-    log_pipeline_stage_timing("final_analysis", perf_counter() - stage_start)
+    final_elapsed = perf_counter() - stage_start
+    log_pipeline_stage_timing("final_analysis", final_elapsed)
+    SYSTEM_TELEMETRY["final_times"].append(final_elapsed)
+    LAST_PIPELINE_STATS["final_time"] = final_elapsed
     return final_output
 
 
@@ -2809,51 +2923,89 @@ def run_chunked_analysis_pipeline(
 ) -> str:
     """Run chunk-aware extraction -> reasoning -> final analysis for large manuscripts."""
     # Developer note: All future large-scale cognition features must use this chunked pipeline.
+    LAST_PIPELINE_STATS.update(
+        {
+            "used_fallback": False,
+            "chunk_count": 0,
+            "extraction_time": 0.0,
+            "reasoning_time": 0.0,
+            "final_time": 0.0,
+        }
+    )
     chunks = split_manuscript_into_chunks(raw_text)
+    LAST_PIPELINE_STATS["chunk_count"] = len(chunks)
+    if not chunks:
+        return ""
     extracted_blocks: list[str] = []
-
+    extraction_stage_total = 0.0
     for chunk_index, chunk in enumerate(chunks, start=1):
         print(f"[Processing chunk {chunk_index}/{len(chunks)}]")
+        print_chunk_progress_bar(chunk_index, len(chunks))
+        chunk_start = perf_counter()
         extraction_prompt = build_extraction_prompt(chunk)
-        extracted = call_ai(
-            "canon_extract",
-            extraction_prompt,
-            client=client,
-        ).strip()
+        try:
+            extracted = call_ai(
+                "canon_extract",
+                extraction_prompt,
+                client=client,
+            ).strip()
+        except Exception:
+            extracted = ""
         if extracted:
             extracted_blocks.append(
                 truncate_for_pipeline(extracted, MAX_PIPELINE_EXTRACTION_CHARS)
             )
+        else:
+            extracted_blocks.append(
+                truncate_for_pipeline(chunk, MAX_PIPELINE_EXTRACTION_CHARS)
+            )
+        chunk_elapsed = perf_counter() - chunk_start
+        extraction_stage_total += chunk_elapsed
+        CHUNK_OPTIMISER["history"].append(chunk_elapsed)
+    print("[Stage complete: extraction ✓]")
 
     merged_extraction = "\n\n".join(extracted_blocks).strip()
     if not merged_extraction:
         merged_extraction = truncate_for_pipeline(raw_text, MAX_PIPELINE_EXTRACTION_CHARS)
 
+    reasoning_start = perf_counter()
     reasoning_prompt = build_reasoning_prompt(merged_extraction)
-    reasoning_report = call_ai(
-        "logic_audit",
-        reasoning_prompt,
-        client=client,
-    ).strip()
+    try:
+        reasoning_report = call_ai(
+            "logic_audit",
+            reasoning_prompt,
+            client=client,
+        ).strip()
+    except Exception:
+        reasoning_report = ""
     if not reasoning_report:
         reasoning_report = merged_extraction
     reasoning_report = truncate_for_pipeline(reasoning_report, MAX_PIPELINE_REASONING_CHARS)
+    reasoning_elapsed = perf_counter() - reasoning_start
+    print("[Stage complete: reasoning ✓]")
 
+    final_start = perf_counter()
     print("[Final synthesis stage]")
     final_prompt = build_final_analysis_prompt(reasoning_report, user_prompt)
     final_output = ""
-    for task_type in ("book_analysis", "logic_audit", "canon_extract"):
-        try:
-            candidate = call_ai(
-                task_type,
-                final_prompt,
-                client=client,
-            ).strip()
-        except Exception:
-            candidate = ""
-        if candidate:
-            final_output = candidate
-            break
+    try:
+        final_output = call_ai(
+            "book_analysis",
+            final_prompt,
+            client=client,
+        ).strip()
+    except Exception:
+        final_output = ""
+
+    final_elapsed = perf_counter() - final_start
+    SYSTEM_TELEMETRY["extraction_times"].append(extraction_stage_total)
+    SYSTEM_TELEMETRY["reasoning_times"].append(reasoning_elapsed)
+    SYSTEM_TELEMETRY["final_times"].append(final_elapsed)
+    LAST_PIPELINE_STATS["extraction_time"] = extraction_stage_total
+    LAST_PIPELINE_STATS["reasoning_time"] = reasoning_elapsed
+    LAST_PIPELINE_STATS["final_time"] = final_elapsed
+    print("[Stage complete: final synthesis ✓]")
+    adapt_chunk_size()
 
     return final_output
 
@@ -3577,6 +3729,7 @@ def handle_book_integrity(client: Any) -> None:
 
     print()
     print(report)
+    print_pipeline_confidence()
     print()
     print(f"Book integrity report saved to {report_path}.")
 
@@ -3656,6 +3809,7 @@ def handle_world_consistency(client: Any) -> None:
 
     print()
     print(final_report)
+    print_pipeline_confidence()
 
 
 def handle_character_consistency(client: Any) -> None:
@@ -3720,6 +3874,7 @@ def handle_character_consistency(client: Any) -> None:
 
     print()
     print(final_report)
+    print_pipeline_confidence()
 
 
 def handle_rebuild_memory(client: Any, command_text: str = "") -> None:
@@ -4044,6 +4199,8 @@ def handle_idea_resurface(client: Any) -> None:
 
     print()
     print(result)
+    if scope_selection == "2":
+        print_pipeline_confidence()
 
 
 
@@ -4317,6 +4474,8 @@ def handle_draft_pass(client: Any, command_text: str = "") -> None:
 
     print()
     print(result)
+    if scope_selection == "2":
+        print_pipeline_confidence()
 
 
 def handle_build_book() -> None:
@@ -4922,6 +5081,23 @@ def handle_system_health() -> None:
         print("Warnings:")
         for warning in warnings:
             print(f"- {warning}")
+
+
+def handle_system_performance() -> None:
+    """Display session telemetry for command and staged AI performance."""
+    extraction_times = SYSTEM_TELEMETRY["extraction_times"]
+    reasoning_times = SYSTEM_TELEMETRY["reasoning_times"]
+    final_times = SYSTEM_TELEMETRY["final_times"]
+
+    def average(values: list[float]) -> float:
+        return sum(values) / len(values) if values else 0.0
+
+    print("SYSTEM PERFORMANCE")
+    print(f"- commands run: {SYSTEM_TELEMETRY['total_commands']}")
+    print(f"- longest command: {SYSTEM_TELEMETRY['longest_command']:.3f}s")
+    print(f"- avg extraction time: {average(extraction_times):.3f}s")
+    print(f"- avg reasoning time: {average(reasoning_times):.3f}s")
+    print(f"- avg final time: {average(final_times):.3f}s")
 
 
 TIMELINE_STOPWORDS = {
@@ -6038,6 +6214,14 @@ Canon memory impact: None.
 Manuscript impact: None.
 Safety level: Safe.
 When to use: Before long sessions or when system/performance drift is suspected.""",
+    "/system-performance": """Purpose: Display session-level command and staged AI timing telemetry.
+Files read: In-memory runtime telemetry only.
+Files written: None.
+AI usage: No.
+Canon memory impact: None.
+Manuscript impact: None.
+Safety level: Safe.
+When to use: When evaluating runtime performance trends and adaptive chunk behaviour.""",
     "/help --describe": """Purpose: Interactive static command manual lookup by numbered command selection.
 Files read: Built-in ALL_COMMANDS and COMMAND_HELP constants only.
 Files written: None.
@@ -6962,13 +7146,16 @@ def handle_system(command_text: str = "") -> None:
     if "--health" in command_text:
         handle_system_health()
         return
+    if "--performance" in command_text or command_text.strip().startswith("/system-performance"):
+        handle_system_performance()
+        return
     if "--map" in command_text:
         command_system_map()
         return
     if "--tree" in command_text:
         command_system_tree()
         return
-    print("Unsupported system option. Use /system --tree, /system --map, or /system --health")
+    print("Unsupported system option. Use /system --tree, /system --map, /system --health, or /system-performance")
 
 
 
@@ -7016,6 +7203,8 @@ def main() -> None:
         "/export-chapter": lambda command_text="": handle_export_chapter(),
         "/system --map": handle_system,
         "/system --tree": handle_system,
+        "/system --performance": handle_system,
+        "/system-performance": handle_system,
         "/system": handle_system,
         "/export-book": handle_export_book,
         "/export-book --docx": handle_export_book,
@@ -7053,7 +7242,14 @@ def main() -> None:
         routed = False
         for command_name in sorted(command_handlers.keys(), key=len, reverse=True):
             if command_matches_input(command_name, user_input):
+                command_start = perf_counter()
                 command_handlers[command_name](user_input)
+                elapsed = perf_counter() - command_start
+                SYSTEM_TELEMETRY["total_commands"] += 1
+                SYSTEM_TELEMETRY["longest_command"] = max(
+                    SYSTEM_TELEMETRY["longest_command"],
+                    elapsed,
+                )
                 routed = True
                 break
 
