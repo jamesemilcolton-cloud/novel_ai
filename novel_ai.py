@@ -2921,6 +2921,7 @@ def run_chunked_analysis_pipeline(
 ) -> str:
     """Run chunk-aware extraction -> reasoning -> final analysis for large manuscripts."""
     # Developer note: All future large-scale cognition features must use this chunked pipeline.
+    # Developer safety invariant: pipeline must always return non-empty output.
     LAST_PIPELINE_STATS.update(
         {
             "used_fallback": False,
@@ -2934,7 +2935,9 @@ def run_chunked_analysis_pipeline(
     _pipeline_depth = select_pipeline_depth_placeholder(raw_text)
     LAST_PIPELINE_STATS["chunk_count"] = len(chunks)
     if not chunks:
-        return ""
+        safe_message = "[Analysis could not be completed due to AI service failure. Partial data shown.]"
+        assert safe_message.strip(), "Pipeline safety invariant failed: empty safe message."
+        return safe_message
     extracted_blocks: list[str] = []
     extraction_stage_total = 0.0
     for chunk_index, chunk in enumerate(chunks, start=1):
@@ -3018,6 +3021,16 @@ def run_chunked_analysis_pipeline(
             if fallback_index > 0:
                 LAST_PIPELINE_STATS["used_fallback"] = True
             break
+    if not final_output:
+        if reasoning_report.strip():
+            final_output = reasoning_report
+            LAST_PIPELINE_STATS["used_fallback"] = True
+        elif merged_extraction.strip():
+            final_output = merged_extraction
+            LAST_PIPELINE_STATS["used_fallback"] = True
+        else:
+            final_output = "[Analysis could not be completed due to AI service failure. Partial data shown.]"
+            LAST_PIPELINE_STATS["used_fallback"] = True
 
     final_elapsed = perf_counter() - final_start
     SYSTEM_TELEMETRY["extraction_times"].append(extraction_stage_total)
@@ -3029,6 +3042,7 @@ def run_chunked_analysis_pipeline(
     print("[Stage complete: final synthesis ✓]")
     total_time = extraction_stage_total + reasoning_elapsed + final_elapsed
     adapt_chunk_size(total_time, len(chunks))
+    assert final_output.strip(), "Pipeline safety invariant failed: empty output from chunked analysis."
     return final_output
 
 
@@ -6559,16 +6573,58 @@ def update_help_commands_from_handlers(command_handlers: dict[str, Callable[[str
     ALL_COMMANDS = sorted(set(command_handlers.keys()), key=lambda item: (item.split()[0], item))
 
 
-def command_matches_input(command_name: str, user_input: str) -> bool:
-    """Flexible command routing with prefix support for option-bearing commands."""
+COMMAND_GRAMMAR_PATTERNS: dict[str, tuple[re.Pattern[str], ...]] = {
+    "/rebuild-memory": (
+        re.compile(r"^/rebuild-memory$"),
+        re.compile(r"^/rebuild-memory\s+(?:full|single)$"),
+    ),
+    "/draft-pass": (
+        re.compile(r"^/draft-pass$"),
+        re.compile(r"^/draft-pass\s+--(?:structure|tension|character|clarity)$"),
+    ),
+    "/research": (
+        re.compile(r"^/research$"),
+        re.compile(r"^/research\s+--world$"),
+    ),
+    "/export-book": (
+        re.compile(r"^/export-book$"),
+        re.compile(r"^/export-book\s+--docx$"),
+    ),
+    "/system": (
+        re.compile(r"^/system$"),
+        re.compile(r"^/system\s+--(?:health|performance|map|tree)$"),
+    ),
+    "/help": (
+        re.compile(r"^/help$"),
+        re.compile(r"^/help\s+--(?:describe|workflow|when)$"),
+    ),
+}
+
+
+def get_command_base_token(user_input: str) -> str:
+    """Extract the command token (`/name`) from raw user input."""
     normalized_user_input = user_input.strip()
-    if normalized_user_input == command_name:
-        return True
-    if normalized_user_input.startswith(f"{command_name} "):
-        return True
-    if " " in command_name and normalized_user_input.startswith(command_name):
-        return True
-    return False
+    if not normalized_user_input:
+        return ""
+    return normalized_user_input.split()[0]
+
+
+def is_valid_command_input(user_input: str, valid_commands: set[str]) -> bool:
+    """
+    Strict command validation:
+    - must match an exact command token, OR
+    - match one explicitly allowed grammar pattern.
+    """
+    normalized_user_input = user_input.strip()
+    if not normalized_user_input:
+        return False
+    base_command = get_command_base_token(normalized_user_input)
+    if base_command not in valid_commands:
+        return False
+    patterns = COMMAND_GRAMMAR_PATTERNS.get(base_command)
+    if not patterns:
+        return normalized_user_input == base_command
+    return any(pattern.fullmatch(normalized_user_input) for pattern in patterns)
 
 
 def handle_help_workflow() -> None:
@@ -6701,6 +6757,21 @@ Strategic commands only when necessary.
 
 =================================================="""
     )
+
+
+def handle_help(command_text: str = "") -> None:
+    """Route /help options to the corresponding static help output."""
+    normalized_command = command_text.strip().lower()
+    if normalized_command == "/help --describe":
+        handle_help_describe()
+        return
+    if normalized_command == "/help --workflow":
+        handle_help_workflow()
+        return
+    if normalized_command == "/help --when":
+        handle_help_when()
+        return
+    print_help()
 
 
 def handle_help_when() -> None:
@@ -7270,10 +7341,10 @@ def main() -> None:
         "/export-book --docx": handle_export_book,
         "/novel-stats": lambda command_text="": handle_novel_stats(),
         "/system --health": handle_system,
-        "/help --describe": lambda command_text="": handle_help_describe(),
-        "/help --workflow": lambda command_text="": handle_help_workflow(),
-        "/help --when": lambda command_text="": handle_help_when(),
-        "/help": lambda command_text="": print_help(),
+        "/help --describe": handle_help,
+        "/help --workflow": handle_help,
+        "/help --when": handle_help,
+        "/help": handle_help,
     }
     update_help_commands_from_handlers(command_handlers)
     rebuild_help_descriptions()
@@ -7299,19 +7370,19 @@ def main() -> None:
             break
 
 
-        routed = False
-        for command_name in sorted(command_handlers.keys(), key=len, reverse=True):
-            if command_matches_input(command_name, user_input):
-                reset_pipeline_stats_for_command()
-                command_start = perf_counter()
-                try:
-                    command_handlers[command_name](user_input)
-                finally:
-                    record_command_runtime(perf_counter() - command_start)
-                routed = True
-                break
-
-        if routed:
+        if user_input.startswith("/"):
+            # Developer safety invariant: command routing must remain strict.
+            valid_command_tokens = {command.split()[0] for command in command_handlers}
+            if not is_valid_command_input(user_input, valid_command_tokens):
+                print("Unknown command. Type /help for commands.")
+                continue
+            command_token = get_command_base_token(user_input)
+            reset_pipeline_stats_for_command()
+            command_start = perf_counter()
+            try:
+                command_handlers[command_token](user_input)
+            finally:
+                record_command_runtime(perf_counter() - command_start)
             continue
 
         memory_block = load_memory_block()
