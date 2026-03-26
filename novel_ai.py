@@ -100,6 +100,13 @@ MAX_CANON_CHARACTERS = 12000
 DEFAULT_ANALYSIS_CHUNK_WORDS = 6000
 MAX_PIPELINE_EXTRACTION_CHARS = 12000
 MAX_PIPELINE_REASONING_CHARS = 16000
+SYSTEM_TELEMETRY = {
+    "extraction_times": [],
+    "reasoning_times": [],
+    "final_times": [],
+    "total_commands": 0,
+    "longest_command": 0.0,
+}
 
 MAIN_SYSTEM_PROMPT = """You are a thoughtful AI novel-writing assistant.
 Help the user think through story ideas, scenes, structure, tone, character, and prose.
@@ -1886,6 +1893,30 @@ def print_large_manuscript_warning_if_needed(text: str) -> None:
         print("Large manuscript mode active — processing may be slower.")
 
 
+def render_progress_bar(current: int, total: int, width: int = 20) -> None:
+    """Render a simple terminal-safe chunk progress bar."""
+    safe_total = max(total, 1)
+    clamped_current = min(max(current, 0), safe_total)
+    ratio = clamped_current / safe_total
+    filled = int(width * ratio)
+    bar = "█" * filled + "░" * (width - filled)
+    print(f"[{bar}] {clamped_current}/{safe_total}")
+
+
+def estimate_remaining(avg_time: float, remaining_chunks: int) -> float:
+    """Estimate remaining stage time from rolling average chunk durations."""
+    return avg_time * remaining_chunks
+
+
+def update_system_telemetry(total_time: float) -> None:
+    """Update aggregate per-command telemetry counters."""
+    SYSTEM_TELEMETRY["total_commands"] += 1
+    SYSTEM_TELEMETRY["longest_command"] = max(
+        SYSTEM_TELEMETRY["longest_command"],
+        total_time,
+    )
+
+
 def write_full_novel_processor_log(
     command_name: str,
     chunk_count: int,
@@ -2697,6 +2728,7 @@ def run_analysis_pipeline(
 ) -> str:
     """Run extraction -> reasoning -> final analysis pipeline with graceful fallbacks."""
     # Backward-compatible single-block staged pipeline.
+    command_start = perf_counter()
     # Stage 1 — Extraction
     stage_start = perf_counter()
     extraction_prompt = build_extraction_prompt(raw_text)
@@ -2712,7 +2744,9 @@ def run_analysis_pipeline(
     if not extracted:
         extracted = raw_text
     extracted = truncate_for_pipeline(extracted, MAX_PIPELINE_EXTRACTION_CHARS)
-    log_pipeline_stage_timing("extraction", perf_counter() - stage_start)
+    extraction_stage_time = perf_counter() - stage_start
+    log_pipeline_stage_timing("extraction", extraction_stage_time)
+    SYSTEM_TELEMETRY["extraction_times"].append(extraction_stage_time)
 
     # Stage 2 — Reasoning
     stage_start = perf_counter()
@@ -2729,7 +2763,9 @@ def run_analysis_pipeline(
     if not reasoning_report:
         reasoning_report = extracted
     reasoning_report = truncate_for_pipeline(reasoning_report, MAX_PIPELINE_REASONING_CHARS)
-    log_pipeline_stage_timing("reasoning", perf_counter() - stage_start)
+    reasoning_stage_time = perf_counter() - stage_start
+    log_pipeline_stage_timing("reasoning", reasoning_stage_time)
+    SYSTEM_TELEMETRY["reasoning_times"].append(reasoning_stage_time)
 
     # Stage 3 — Final Analysis
     stage_start = perf_counter()
@@ -2761,7 +2797,10 @@ def run_analysis_pipeline(
             client=client,
             temperature=temperature,
         ).strip()
-    log_pipeline_stage_timing("final_analysis", perf_counter() - stage_start)
+    final_stage_time = perf_counter() - stage_start
+    log_pipeline_stage_timing("final_analysis", final_stage_time)
+    SYSTEM_TELEMETRY["final_times"].append(final_stage_time)
+    update_system_telemetry(perf_counter() - command_start)
     return final_output
 
 
@@ -2773,10 +2812,21 @@ def run_chunked_analysis_pipeline(
 ) -> str:
     """Run chunk-aware extraction -> reasoning -> final analysis for large manuscripts."""
     # Developer note: All future large-scale cognition features must use this chunked pipeline.
+    command_start = perf_counter()
     chunks = split_manuscript_into_chunks(raw_text)
     extracted_blocks: list[str] = []
+    stage_start = perf_counter()
 
-    for chunk in chunks:
+    for chunk_index, chunk in enumerate(chunks):
+        print(f"[Extraction chunk {chunk_index + 1}/{len(chunks)}]")
+        render_progress_bar(chunk_index + 1, len(chunks))
+        if SYSTEM_TELEMETRY["extraction_times"]:
+            average_extraction_time = (
+                sum(SYSTEM_TELEMETRY["extraction_times"]) / len(SYSTEM_TELEMETRY["extraction_times"])
+            )
+            remaining_chunks = len(chunks) - (chunk_index + 1)
+            estimate = estimate_remaining(average_extraction_time, remaining_chunks)
+            print(f"Estimated extraction time remaining: {estimate:.1f}s")
         extraction_prompt = build_extraction_prompt(chunk)
         extracted = call_ai(
             "canon_extract",
@@ -2787,21 +2837,36 @@ def run_chunked_analysis_pipeline(
             extracted_blocks.append(
                 truncate_for_pipeline(extracted, MAX_PIPELINE_EXTRACTION_CHARS)
             )
+    extraction_stage_time = perf_counter() - stage_start
+    SYSTEM_TELEMETRY["extraction_times"].append(extraction_stage_time)
+    print(f"✓ Extraction stage complete ({extraction_stage_time:.2f}s)")
 
     merged_extraction = "\n\n".join(extracted_blocks).strip()
     if not merged_extraction:
         merged_extraction = truncate_for_pipeline(raw_text, MAX_PIPELINE_EXTRACTION_CHARS)
 
+    stage_start = perf_counter()
     reasoning_prompt = build_reasoning_prompt(merged_extraction)
-    reasoning_report = call_ai(
-        "logic_audit",
-        reasoning_prompt,
-        client=client,
-    ).strip()
+    reasoning_fallback_triggered = False
+    try:
+        reasoning_report = call_ai(
+            "logic_audit",
+            reasoning_prompt,
+            client=client,
+        ).strip()
+    except Exception:
+        reasoning_report = ""
     if not reasoning_report:
         reasoning_report = merged_extraction
+        reasoning_fallback_triggered = True
     reasoning_report = truncate_for_pipeline(reasoning_report, MAX_PIPELINE_REASONING_CHARS)
+    reasoning_stage_time = perf_counter() - stage_start
+    SYSTEM_TELEMETRY["reasoning_times"].append(reasoning_stage_time)
+    print(f"✓ Logical audit complete ({reasoning_stage_time:.2f}s)")
+    if reasoning_fallback_triggered:
+        print("⚠ Reasoning fallback triggered")
 
+    stage_start = perf_counter()
     final_prompt = build_final_analysis_prompt(reasoning_report, user_prompt)
     final_output = ""
     for task_type in ("book_analysis", "logic_audit", "canon_extract"):
@@ -2816,6 +2881,13 @@ def run_chunked_analysis_pipeline(
         if candidate:
             final_output = candidate
             break
+
+    final_stage_time = perf_counter() - stage_start
+    SYSTEM_TELEMETRY["final_times"].append(final_stage_time)
+    print(f"✓ Final synthesis complete ({final_stage_time:.2f}s)")
+    total_time = perf_counter() - command_start
+    update_system_telemetry(total_time)
+    print(f"[Total analysis time: {total_time:.2f}s]")
 
     return final_output
 
@@ -4886,6 +4958,25 @@ def handle_system_health() -> None:
             print(f"- {warning}")
 
 
+def handle_system_performance() -> None:
+    """Show aggregated runtime telemetry from analysis pipelines."""
+    if SYSTEM_TELEMETRY["total_commands"] == 0:
+        print("No telemetry data yet.")
+        return
+
+    def avg(values: list[float]) -> float:
+        return sum(values) / len(values) if values else 0.0
+
+    print("SYSTEM PERFORMANCE REPORT")
+    print()
+    print(f"Commands run: {SYSTEM_TELEMETRY['total_commands']}")
+    print(f"Longest command: {SYSTEM_TELEMETRY['longest_command']:.2f}s")
+    print()
+    print(f"Avg extraction time: {avg(SYSTEM_TELEMETRY['extraction_times']):.2f}s")
+    print(f"Avg reasoning time: {avg(SYSTEM_TELEMETRY['reasoning_times']):.2f}s")
+    print(f"Avg final stage time: {avg(SYSTEM_TELEMETRY['final_times']):.2f}s")
+
+
 TIMELINE_STOPWORDS = {
     "a", "an", "and", "approaches", "as", "at", "be", "been", "being", "by",
     "for", "from", "has", "have", "in", "into", "is", "it", "its", "later",
@@ -6000,6 +6091,14 @@ Canon memory impact: None.
 Manuscript impact: None.
 Safety level: Safe.
 When to use: Before long sessions or when system/performance drift is suspected.""",
+    "/system-performance": """Purpose: Display runtime telemetry averages for staged AI analysis pipelines.
+Files read: In-memory telemetry counters for current session only.
+Files written: None.
+AI usage: No.
+Canon memory impact: None.
+Manuscript impact: None.
+Safety level: Safe.
+When to use: After running analysis commands to inspect timing trends and fallback exposure.""",
     "/help --describe": """Purpose: Interactive static command manual lookup by numbered command selection.
 Files read: Built-in ALL_COMMANDS and COMMAND_HELP constants only.
 Files written: None.
@@ -6979,6 +7078,7 @@ def main() -> None:
         "/system --map": handle_system,
         "/system --tree": handle_system,
         "/system": handle_system,
+        "/system-performance": lambda command_text="": handle_system_performance(),
         "/export-book": handle_export_book,
         "/export-book --docx": handle_export_book,
         "/novel-stats": lambda command_text="": handle_novel_stats(),
