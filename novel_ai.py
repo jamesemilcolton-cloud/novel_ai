@@ -9,6 +9,7 @@ import itertools
 import sys
 import threading
 import time
+import uuid
 from collections import Counter, OrderedDict
 from copy import deepcopy
 from datetime import datetime, timedelta
@@ -118,6 +119,9 @@ PIPELINE_DECISION_SCAFFOLD_WORDS = 250
 # - Chunk size adapts dynamically for session-level optimisation.
 # - Telemetry persists through session runtime for optimisation and diagnostics.
 # - Confidence score reflects pipeline stability, not narrative quality.
+# - Pipeline outputs must never be empty; always degrade to usable fallback text.
+# - Append-style persistence must use atomic read+rewrite writes.
+# - Backups must be uniquely named and never overwrite existing snapshots.
 SYSTEM_TELEMETRY = {
     "extraction_times": [],
     "reasoning_times": [],
@@ -927,16 +931,44 @@ def ensure_project_files() -> None:
 
 def atomic_write(path: Path, text: str) -> None:
     """Write text to a temporary file and atomically replace the destination."""
-    tmp = path.with_suffix(path.suffix + ".tmp")
-    tmp.write_text(text, encoding="utf-8")
-    tmp.replace(path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp = path.with_suffix(path.suffix + f".tmp.{os.getpid()}.{uuid.uuid4().hex[:8]}")
+    with tmp.open("w", encoding="utf-8") as handle:
+        handle.write(text)
+        handle.flush()
+        os.fsync(handle.fileno())
+    os.replace(tmp, path)
+
+
+def atomic_append(path: Path, text_to_append: str) -> None:
+    """
+    Append text using read+rewrite atomic replace semantics.
+
+    Developer safety invariant: all append-style persistence writes must be atomic.
+    """
+    existing_text = path.read_text(encoding="utf-8") if path.exists() else ""
+    atomic_write(path, existing_text + text_to_append)
+
+
+def _unique_backup_path(directory: Path, filename_prefix: str) -> Path:
+    """Build a unique backup filename using second precision plus collision suffix."""
+    timestamp = datetime.utcnow().strftime("%Y%m%d_%H%M%S")
+    base_name = f"{filename_prefix}_{timestamp}"
+    candidate = directory / f"{base_name}.txt"
+    if not candidate.exists():
+        return candidate
+    counter = 1
+    while True:
+        collision_candidate = directory / f"{base_name}_{counter}.txt"
+        if not collision_candidate.exists():
+            return collision_candidate
+        counter += 1
 
 
 def create_operation_backup(backup_type: str, source_path: Path | None = None, content: str | None = None) -> Path:
     """Create project-level timestamp backup for canon/chapter/draft restore operations."""
     PROJECT_BACKUPS_DIR.mkdir(parents=True, exist_ok=True)
-    backup_timestamp = datetime.utcnow().strftime("%Y%m%d_%H%M")
-    backup_path = PROJECT_BACKUPS_DIR / f"backup_{backup_type}_{backup_timestamp}.txt"
+    backup_path = _unique_backup_path(PROJECT_BACKUPS_DIR, f"backup_{backup_type}")
     if content is not None:
         backup_content = content
     elif source_path is not None and source_path.exists():
@@ -950,8 +982,7 @@ def create_operation_backup(backup_type: str, source_path: Path | None = None, c
 def create_canon_memory_guard_backup() -> Path:
     """Create a timestamped canon memory backup for guarded writes."""
     CANON_MEMORY_BACKUPS_DIR.mkdir(parents=True, exist_ok=True)
-    backup_timestamp = datetime.utcnow().strftime("%Y%m%d_%H%M%S")
-    backup_path = CANON_MEMORY_BACKUPS_DIR / f"canon_backup_{backup_timestamp}.txt"
+    backup_path = _unique_backup_path(CANON_MEMORY_BACKUPS_DIR, "canon_backup")
     backup_content = (
         CANON_MEMORY_PATH.read_text(encoding="utf-8")
         if CANON_MEMORY_PATH.exists()
@@ -1181,15 +1212,16 @@ def append_world_rule(category: str, rule_text: str) -> None:
         else ""
     )
 
-    with WORLD_RULES_PATH.open("a", encoding="utf-8") as file:
-        if existing_content.strip():
-            separator = "\n\n"
-            if existing_content.endswith("\n\n"):
-                separator = ""
-            elif existing_content.endswith("\n"):
-                separator = "\n"
-            file.write(separator)
-        file.write(entry + "\n")
+    append_text = ""
+    if existing_content.strip():
+        separator = "\n\n"
+        if existing_content.endswith("\n\n"):
+            separator = ""
+        elif existing_content.endswith("\n"):
+            separator = "\n"
+        append_text += separator
+    append_text += entry + "\n"
+    atomic_append(WORLD_RULES_PATH, append_text)
 
 
 
@@ -1687,10 +1719,8 @@ def append_scene_summary(chapter_number: int, summary_text: str) -> None:
     divider = "=" * 40
     entry = f"{divider}\nCHAPTER {chapter_number}\n{divider}\n{cleaned_summary}\n"
 
-    with SCENE_SUMMARIES_PATH.open("a", encoding="utf-8") as file:
-        if SCENE_SUMMARIES_PATH.stat().st_size > 0:
-            file.write("\n")
-        file.write(entry)
+    separator = "\n" if SCENE_SUMMARIES_PATH.exists() and SCENE_SUMMARIES_PATH.stat().st_size > 0 else ""
+    atomic_append(SCENE_SUMMARIES_PATH, separator + entry)
 
 
 def remove_scene_summary_block(chapter_number: int) -> bool:
@@ -1726,21 +1756,20 @@ def append_idea(text: str) -> None:
     """Append a timestamped writing idea to the ideas log."""
     PROJECT_MEMORY_DIR.mkdir(parents=True, exist_ok=True)
     timestamp = datetime.now()
-    with IDEAS_PATH.open("a", encoding="utf-8") as file:
-        file.write(
-            "\n".join(
-                [
-                    "========================",
-                    timestamp.strftime("%Y-%m-%d %H:%M"),
-                    "========================",
-                    "Idea:",
-                    text.strip(),
-                    "",
-                    "",
-                ]
-            )
+    atomic_append(
+        IDEAS_PATH,
+        "\n".join(
+            [
+                "========================",
+                timestamp.strftime("%Y-%m-%d %H:%M"),
+                "========================",
+                "Idea:",
+                text.strip(),
+                "",
+                "",
+            ]
         )
-
+    )
 
 
 def build_chapter_memory_block(
@@ -2054,11 +2083,11 @@ def write_full_novel_processor_log(
     timestamp = datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S UTC")
     try:
         FULL_NOVEL_PROCESSOR_LOG_DIR.mkdir(parents=True, exist_ok=True)
-        with FULL_NOVEL_PROCESSOR_LOG_PATH.open("a", encoding="utf-8") as handle:
-            handle.write(
-                f"{timestamp} | command={command_name} | chunks={chunk_count} | "
-                f"status={'success' if success else 'failure'}\n"
-            )
+        atomic_append(
+            FULL_NOVEL_PROCESSOR_LOG_PATH,
+            f"{timestamp} | command={command_name} | chunks={chunk_count} | "
+            f"status={'success' if success else 'failure'}\n",
+        )
     except OSError as exc:
         print(f"Warning: Could not write processor log: {exc}")
 
@@ -2144,10 +2173,14 @@ def run_full_novel_processor(
     task_type: str = "continuity_check",
 ) -> str:
     """Run FULL_NOVEL_PROCESSOR using staged extraction, reasoning synthesis, then one final analysis."""
+    # Developer safety invariant: pipeline analysis must never return empty/whitespace output.
+    fallback_error_message = (
+        "[Full analysis could not be completed due to AI service failure. Partial processing data shown.]"
+    )
     ordered_chunks = [chunk.strip() for chunk in chunks if chunk.strip()]
     if not ordered_chunks:
         write_full_novel_processor_log(command_name, len(chunks), False)
-        return ""
+        return fallback_error_message
 
     extracted_chunks: list[str] = []
     for chunk_index, chunk_text in enumerate(ordered_chunks, start=1):
@@ -2210,19 +2243,27 @@ def run_full_novel_processor(
     except Exception:
         final_output = ""
     if not final_output.strip():
-        final_output = call_ai(
-            "logic_audit",
-            final_prompt,
-            client=client,
-            temperature=temperature,
-        )
+        try:
+            final_output = call_ai(
+                "logic_audit",
+                final_prompt,
+                client=client,
+                temperature=temperature,
+            )
+        except Exception:
+            final_output = ""
     if not final_output.strip():
-        final_output = call_ai(
-            "canon_extract",
-            final_prompt,
-            client=client,
-            temperature=temperature,
-        )
+        try:
+            final_output = call_ai(
+                "canon_extract",
+                final_prompt,
+                client=client,
+                temperature=temperature,
+            )
+        except Exception:
+            final_output = ""
+    if not final_output.strip():
+        final_output = reasoning_report.strip() or extracted_payload.strip() or fallback_error_message
     log_pipeline_stage_timing(f"{command_name}:final_analysis", perf_counter() - final_start)
 
     success = bool(final_output.strip())
@@ -2462,11 +2503,8 @@ def parse_memory_suggestions(result: str) -> list[tuple[int, str, str]]:
     if unparsed_lines:
         try:
             timestamp = datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S UTC")
-            with UNPARSED_MEMORY_SUGGESTIONS_LOG_PATH.open("a", encoding="utf-8") as handle:
-                handle.write(f"{timestamp}\n")
-                for line in unparsed_lines:
-                    handle.write(f"- {line}\n")
-                handle.write("\n")
+            log_lines = [f"{timestamp}"] + [f"- {line}" for line in unparsed_lines] + [""]
+            atomic_append(UNPARSED_MEMORY_SUGGESTIONS_LOG_PATH, "\n".join(log_lines) + "\n")
         except OSError:
             pass
     return suggestions
@@ -2825,11 +2863,11 @@ def log_pipeline_stage_timing(stage_name: str, elapsed_seconds: float) -> None:
     timestamp = datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S UTC")
     try:
         FULL_NOVEL_PROCESSOR_LOG_DIR.mkdir(parents=True, exist_ok=True)
-        with FULL_NOVEL_PROCESSOR_LOG_PATH.open("a", encoding="utf-8") as handle:
-            handle.write(
-                f"{timestamp} | pipeline_stage={stage_name} | "
-                f"duration={elapsed_seconds:.3f}s\n"
-            )
+        atomic_append(
+            FULL_NOVEL_PROCESSOR_LOG_PATH,
+            f"{timestamp} | pipeline_stage={stage_name} | "
+            f"duration={elapsed_seconds:.3f}s\n",
+        )
     except OSError:
         return
 
