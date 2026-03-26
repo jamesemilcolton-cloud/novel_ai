@@ -57,6 +57,20 @@ BRACKETED_PASTE_PATTERN = re.compile(r"(?:\033\[|\^\[\[?)(?:200~|201~|E)|\[\[200
 DISALLOWED_CONTROL_CHAR_PATTERN = re.compile(r"[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]")
 
 MODEL_NAME = os.getenv("OPENAI_MODEL", "gpt-4.1-mini")
+MODEL_ROUTER = {
+    "research": "gpt-5.3",
+    "world_research": "gpt-5.3",
+    "book_analysis": "gpt-5.3",
+    "continuity_check": "gpt-5.2-reasoning",
+    "logic_audit": "gpt-5.2-reasoning",
+    "timeline_check": "gpt-5.2-reasoning",
+    "proofread": "gpt-5-mini",
+    "recap": "gpt-5-mini",
+    "canon_extract": "gpt-5-mini",
+    "idea_resurface": "gpt-5-mini",
+    "help_describe": "gpt-5-mini",
+}
+FALLBACK_MODEL = "gpt-5-mini"
 MAIN_TEMPERATURE = 0.8
 SCENE_TEMPERATURE = 0.1
 CONTINUITY_TEMPERATURE = 0.0
@@ -1882,6 +1896,7 @@ def process_chunks(
     chunks: list[str],
     *,
     temperature: float = CONTINUITY_TEMPERATURE,
+    task_type: str = "continuity_check",
 ) -> list[str]:
     """Process chunk requests with one retry and continue on repeated failures."""
     summaries: list[str] = []
@@ -1899,6 +1914,7 @@ def process_chunks(
                         {"role": "user", "content": chunk_text},
                     ],
                     temperature=temperature,
+                    task_type=task_type,
                 ).strip()
                 break
             except Exception as exc:  # Keep terminal app stable for the user.
@@ -1919,6 +1935,7 @@ def synthesise_chunk_summaries(
     summaries: list[str],
     *,
     temperature: float = CONTINUITY_TEMPERATURE,
+    task_type: str = "continuity_check",
 ) -> str:
     """Synthesize chunk summaries into one final global report."""
     cleaned_summaries = [summary.strip() for summary in summaries if summary.strip()]
@@ -1939,6 +1956,7 @@ def synthesise_chunk_summaries(
             {"role": "user", "content": synthesis_payload},
         ],
         temperature=temperature,
+        task_type=task_type,
     )
 
 
@@ -1950,6 +1968,7 @@ def run_full_novel_processor(
     chunks: list[str],
     *,
     temperature: float = CONTINUITY_TEMPERATURE,
+    task_type: str = "continuity_check",
 ) -> str:
     """Run FULL_NOVEL_PROCESSOR chunk pass + synthesis + logging."""
     summaries = process_chunks(
@@ -1957,6 +1976,7 @@ def run_full_novel_processor(
         system_prompt=chunk_system_prompt,
         chunks=chunks,
         temperature=temperature,
+        task_type=task_type,
     )
 
     if not summaries:
@@ -1968,6 +1988,7 @@ def run_full_novel_processor(
         system_prompt=synthesis_system_prompt,
         summaries=summaries,
         temperature=temperature,
+        task_type=task_type,
     )
     success = bool(final_output.strip())
     write_full_novel_processor_log(command_name, len(chunks), success)
@@ -2470,18 +2491,44 @@ def create_client() -> Any:
 
 
 
+def call_ai(
+    task_type: str,
+    prompt: Any,
+    *,
+    client: Any,
+    temperature: float | None = None,
+) -> str:
+    """Route AI requests to a model by task type with fallback safety."""
+    # New features must declare task_type in MODEL_ROUTER.
+    model = MODEL_ROUTER.get(task_type, FALLBACK_MODEL)
+    request_kwargs: dict[str, Any] = {"model": model, "input": prompt}
+    if temperature is not None:
+        request_kwargs["temperature"] = temperature
+
+    try:
+        response = client.responses.create(**request_kwargs)
+        return response.output_text
+    except Exception:
+        fallback_kwargs: dict[str, Any] = {"model": FALLBACK_MODEL, "input": prompt}
+        if temperature is not None:
+            fallback_kwargs["temperature"] = temperature
+        fallback = client.responses.create(**fallback_kwargs)
+        return fallback.output_text
+
+
 def request_chat_completion(
     client: Any,
     messages: list[dict[str, str]],
     temperature: float,
+    task_type: str = "general",
 ) -> str:
-    """Send a chat request and return plain text output."""
-    response = client.responses.create(
-        model=MODEL_NAME,
-        input=messages,
+    """Send a chat request via routed model selection and return plain text output."""
+    return call_ai(
+        task_type=task_type,
+        prompt=messages,
+        client=client,
         temperature=temperature,
-    )
-    return response.output_text.strip()
+    ).strip()
 
 
 # ============================================================
@@ -2889,6 +2936,7 @@ def extract_memory_suggestions_for_text(
         client=client,
         messages=build_scene_messages(scene_text),
         temperature=SCENE_TEMPERATURE,
+        task_type="canon_extract",
     )
     return parse_memory_suggestions(result)
 
@@ -2910,6 +2958,7 @@ def extract_memory_suggestions_for_large_text(
         system_prompt=SCENE_SYSTEM_PROMPT,
         chunks=chunks,
         temperature=SCENE_TEMPERATURE,
+        task_type="canon_extract",
     )
 
     merged: list[tuple[int, str, str]] = []
@@ -2948,6 +2997,7 @@ def generate_scene_summary_for_chapter(
             screenplay_block=load_screenplay_block(),
         ),
         temperature=SCENE_TEMPERATURE,
+        task_type="canon_extract",
     )
 
 
@@ -2986,6 +3036,7 @@ def handle_scene_summary(client: Any) -> None:
                 screenplay_block=screenplay_block,
             ),
             temperature=SCENE_TEMPERATURE,
+            task_type="canon_extract",
         )
     except Exception as exc:  # Keep terminal app stable for the user.
         print(f"Scene summary failed: {exc}")
@@ -3128,6 +3179,7 @@ def handle_continuity_check(client: Any) -> None:
             client=client,
             messages=messages,
             temperature=CONTINUITY_TEMPERATURE,
+            task_type="continuity_check",
         )
     except Exception as exc:  # Keep terminal app stable for the user.
         print(f"Continuity check failed: {exc}")
@@ -3200,6 +3252,7 @@ def handle_book_integrity(client: Any) -> None:
             ),
             chunks=analysis_chunks,
             temperature=CONTINUITY_TEMPERATURE,
+            task_type="book_analysis",
         )
     except Exception as exc:  # Keep terminal app stable for the user.
         print(f"Book integrity analysis failed: {exc}")
@@ -3290,6 +3343,7 @@ def handle_world_consistency(client: Any) -> None:
             synthesis_system_prompt=WORLD_CONSISTENCY_SYNTHESIS_SYSTEM_PROMPT,
             chunks=chunk_blocks,
             temperature=CONTINUITY_TEMPERATURE,
+            task_type="logic_audit",
         ).strip()
     except Exception as exc:  # Keep terminal app stable for the user.
         print(f"World consistency audit failed: {exc}")
@@ -3361,6 +3415,7 @@ def handle_character_consistency(client: Any) -> None:
             synthesis_system_prompt=CHARACTER_CONSISTENCY_SYNTHESIS_SYSTEM_PROMPT,
             chunks=chunk_blocks,
             temperature=CONTINUITY_TEMPERATURE,
+            task_type="logic_audit",
         ).strip()
     except Exception as exc:  # Keep terminal app stable for the user.
         print(f"Character consistency audit failed: {exc}")
@@ -3646,6 +3701,7 @@ def handle_proofread(client: Any) -> None:
             client=client,
             messages=build_proofread_messages(text_to_proofread),
             temperature=PROOFREAD_TEMPERATURE,
+            task_type="proofread",
         )
     except Exception:  # Keep terminal app stable for the user.
         print("Proofread failed.")
@@ -3687,6 +3743,7 @@ def handle_idea_resurface(client: Any) -> None:
             client=client,
             messages=messages,
             temperature=IDEA_RESURFACE_TEMPERATURE,
+            task_type="idea_resurface",
         )
     except Exception as exc:  # Keep terminal app stable for the user.
         print(f"Idea resurfacing failed: {exc}")
@@ -3720,6 +3777,7 @@ def handle_chapter_summary(client: Any) -> None:
                 canon_memory_block=canon_memory_block,
             ),
             temperature=SCENE_TEMPERATURE,
+            task_type="canon_extract",
         )
     except Exception as exc:  # Keep terminal app stable for the user.
         print(f"Chapter summary failed: {exc}")
@@ -3792,6 +3850,7 @@ def handle_recap(client: Any) -> None:
             client=client,
             messages=recap_messages,
             temperature=RECAP_TEMPERATURE,
+            task_type="recap",
         )
     except Exception as exc:  # Keep terminal app stable for the user.
         print(f"Recap failed: {exc}")
@@ -3959,6 +4018,7 @@ def handle_draft_pass(client: Any, command_text: str = "") -> None:
                 ),
                 chunks=chapter_chunks,
                 temperature=DRAFT_PASS_TEMPERATURE,
+                task_type="logic_audit",
             )
         else:
             result = request_chat_completion(
@@ -3969,6 +4029,7 @@ def handle_draft_pass(client: Any, command_text: str = "") -> None:
                     dimension_instructions=dimension_instructions,
                 ),
                 temperature=DRAFT_PASS_TEMPERATURE,
+                task_type="logic_audit",
             )
     except Exception as exc:  # Keep terminal app stable for the user.
         print(f"Draft pass failed: {exc}")
@@ -4275,6 +4336,7 @@ def command_research_world(client: Any) -> None:
             client=client,
             messages=messages,
             temperature=RESEARCH_TEMPERATURE,
+            task_type="world_research",
         ).strip()
     except Exception as exc:  # Keep terminal app stable for the user.
         print(f"World plausibility analysis failed: {exc}")
@@ -4970,6 +5032,7 @@ def handle_research_topic(client: Any) -> None:
                 style_choice=style_choice,
             ),
             temperature=RESEARCH_TEMPERATURE,
+            task_type="research",
         )
     except Exception as exc:  # Keep terminal app stable for the user.
         print(f"Research request failed: {exc}")
@@ -5059,6 +5122,7 @@ def handle_research_scene(client: Any) -> None:
                     prior_findings=prior_findings,
                 ),
                 temperature=RESEARCH_SCENE_TEMPERATURE,
+                task_type="research",
             )
             chunk_reports.append(chunk_report)
             prior_findings = "\n\n".join(chunk_reports[-2:])
@@ -5098,6 +5162,7 @@ def handle_research_scene(client: Any) -> None:
                     },
                 ],
                 temperature=RESEARCH_SCENE_TEMPERATURE,
+                task_type="research",
             )
     except Exception as exc:  # Keep terminal app stable for the user.
         print(f"Research scene analysis failed: {exc}")
@@ -5181,6 +5246,7 @@ def handle_research_apply(client: Any) -> None:
                 scene_text=scene_text,
             ),
             temperature=RESEARCH_SCENE_TEMPERATURE,
+            task_type="research",
         )
     except Exception as exc:  # Keep terminal app stable for the user.
         print(f"Research realism audit failed: {exc}")
@@ -5222,6 +5288,7 @@ def handle_research_integrity(client: Any) -> None:
             client=client,
             messages=build_research_integrity_messages(research_corpus),
             temperature=RESEARCH_TEMPERATURE,
+            task_type="research",
         )
     except Exception as exc:  # Keep terminal app stable for the user.
         print(f"Research integrity audit failed: {exc}")
@@ -6722,6 +6789,7 @@ def main() -> None:
                 client=client,
                 messages=messages,
                 temperature=MAIN_TEMPERATURE,
+                task_type="general",
             )
         except Exception as exc:  # Keep terminal app stable for the user.
             print(f"Assistant request failed: {exc}")
