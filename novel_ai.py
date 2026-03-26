@@ -57,7 +57,6 @@ ANSI_ESCAPE_PATTERN = re.compile(r"\033\[[0-9;]*[A-Za-z]")
 BRACKETED_PASTE_PATTERN = re.compile(r"(?:\033\[|\^\[\[?)(?:200~|201~|E)|\[\[200~|\[\[201~")
 DISALLOWED_CONTROL_CHAR_PATTERN = re.compile(r"[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]")
 
-MODEL_NAME = os.getenv("OPENAI_MODEL", "gpt-4.1-mini")
 MODEL_ROUTER = {
     "research": "gpt-5.3",
     "world_research": "gpt-5.3",
@@ -71,7 +70,19 @@ MODEL_ROUTER = {
     "idea_resurface": "gpt-5-mini",
     "help_describe": "gpt-5-mini",
 }
-FALLBACK_MODEL = "gpt-5-mini"
+DEFAULT_TASK_TYPE = "canon_extract"
+TEMPERATURE_ROUTER = {
+    "canon_extract": 0.0,
+    "logic_audit": 0.0,
+    "timeline_check": 0.0,
+    "continuity_check": 0.0,
+    "research": 0.0,
+    "world_research": 0.0,
+    "proofread": 0.1,
+    "recap": 0.3,
+    "idea_resurface": 0.3,
+    "book_analysis": 0.45,
+}
 MAIN_TEMPERATURE = 0.8
 SCENE_TEMPERATURE = 0.1
 CONTINUITY_TEMPERATURE = 0.0
@@ -2040,6 +2051,13 @@ def run_full_novel_processor(
         final_output = ""
     if not final_output.strip():
         final_output = call_ai(
+            "logic_audit",
+            final_prompt,
+            client=client,
+            temperature=temperature,
+        )
+    if not final_output.strip():
+        final_output = call_ai(
             "canon_extract",
             final_prompt,
             client=client,
@@ -2556,19 +2574,34 @@ def call_ai(
     temperature: float | None = None,
 ) -> str:
     """Route AI requests to a model by task type with fallback safety."""
-    # New features must declare task_type in MODEL_ROUTER.
-    model = MODEL_ROUTER.get(task_type, FALLBACK_MODEL)
-    request_kwargs: dict[str, Any] = {"model": model, "input": prompt}
-    if temperature is not None:
-        request_kwargs["temperature"] = temperature
+    resolved_task_type = task_type if task_type in MODEL_ROUTER else DEFAULT_TASK_TYPE
+    model = MODEL_ROUTER[resolved_task_type]
+    resolved_temperature = (
+        temperature
+        if temperature is not None
+        else TEMPERATURE_ROUTER.get(resolved_task_type, 0.2)
+    )
+    request_kwargs: dict[str, Any] = {
+        "model": model,
+        "input": prompt,
+        "temperature": resolved_temperature,
+    }
 
     try:
         response = client.responses.create(**request_kwargs)
         return response.output_text
     except Exception:
-        fallback_kwargs: dict[str, Any] = {"model": FALLBACK_MODEL, "input": prompt}
-        if temperature is not None:
-            fallback_kwargs["temperature"] = temperature
+        fallback_model = MODEL_ROUTER[DEFAULT_TASK_TYPE]
+        fallback_temperature = (
+            temperature
+            if temperature is not None
+            else TEMPERATURE_ROUTER.get(DEFAULT_TASK_TYPE, 0.2)
+        )
+        fallback_kwargs: dict[str, Any] = {
+            "model": fallback_model,
+            "input": prompt,
+            "temperature": fallback_temperature,
+        }
         fallback = client.responses.create(**fallback_kwargs)
         return fallback.output_text
 
@@ -2577,11 +2610,11 @@ def request_chat_completion(
     client: Any,
     messages: list[dict[str, str]],
     temperature: float,
-    task_type: str = "general",
+    task_type: str | None = None,
 ) -> str:
     """Send a chat request via routed model selection and return plain text output."""
     return call_ai(
-        task_type=task_type,
+        task_type=task_type or DEFAULT_TASK_TYPE,
         prompt=messages,
         client=client,
         temperature=temperature,
@@ -2663,6 +2696,7 @@ def run_analysis_pipeline(
     temperature: float | None = None,
 ) -> str:
     """Run extraction -> reasoning -> final analysis pipeline with graceful fallbacks."""
+    # Backward-compatible single-block staged pipeline.
     # Stage 1 — Extraction
     stage_start = perf_counter()
     extraction_prompt = build_extraction_prompt(raw_text)
@@ -2710,6 +2744,16 @@ def run_analysis_pipeline(
     except Exception:
         final_output = ""
     if not final_output:
+        try:
+            final_output = call_ai(
+                "logic_audit",
+                final_prompt,
+                client=client,
+                temperature=temperature,
+            ).strip()
+        except Exception:
+            final_output = ""
+    if not final_output:
         fallback_prompt = build_final_analysis_prompt(reasoning_report or raw_text, user_prompt)
         final_output = call_ai(
             "canon_extract",
@@ -2718,6 +2762,61 @@ def run_analysis_pipeline(
             temperature=temperature,
         ).strip()
     log_pipeline_stage_timing("final_analysis", perf_counter() - stage_start)
+    return final_output
+
+
+def run_chunked_analysis_pipeline(
+    raw_text: str,
+    user_prompt: str,
+    *,
+    client: Any,
+) -> str:
+    """Run chunk-aware extraction -> reasoning -> final analysis for large manuscripts."""
+    # Developer note: All future large-scale cognition features must use this chunked pipeline.
+    chunks = split_manuscript_into_chunks(raw_text)
+    extracted_blocks: list[str] = []
+
+    for chunk in chunks:
+        extraction_prompt = build_extraction_prompt(chunk)
+        extracted = call_ai(
+            "canon_extract",
+            extraction_prompt,
+            client=client,
+        ).strip()
+        if extracted:
+            extracted_blocks.append(
+                truncate_for_pipeline(extracted, MAX_PIPELINE_EXTRACTION_CHARS)
+            )
+
+    merged_extraction = "\n\n".join(extracted_blocks).strip()
+    if not merged_extraction:
+        merged_extraction = truncate_for_pipeline(raw_text, MAX_PIPELINE_EXTRACTION_CHARS)
+
+    reasoning_prompt = build_reasoning_prompt(merged_extraction)
+    reasoning_report = call_ai(
+        "logic_audit",
+        reasoning_prompt,
+        client=client,
+    ).strip()
+    if not reasoning_report:
+        reasoning_report = merged_extraction
+    reasoning_report = truncate_for_pipeline(reasoning_report, MAX_PIPELINE_REASONING_CHARS)
+
+    final_prompt = build_final_analysis_prompt(reasoning_report, user_prompt)
+    final_output = ""
+    for task_type in ("book_analysis", "logic_audit", "canon_extract"):
+        try:
+            candidate = call_ai(
+                task_type,
+                final_prompt,
+                client=client,
+            ).strip()
+        except Exception:
+            candidate = ""
+        if candidate:
+            final_output = candidate
+            break
+
     return final_output
 
 
@@ -3404,8 +3503,7 @@ def handle_book_integrity(client: Any) -> None:
     chapter_blocks = load_all_chapters()
     manuscript_text = "\n\n".join(chapter_blocks).strip()
     print_large_manuscript_warning_if_needed(manuscript_text)
-    chunked_blocks = split_manuscript_into_chunks(manuscript_text)
-    if not chunked_blocks:
+    if not split_manuscript_into_chunks(manuscript_text):
         print("No chapter text found.")
         return
 
@@ -3417,31 +3515,15 @@ def handle_book_integrity(client: Any) -> None:
     )
 
     try:
-        analysis_chunks = [
-            (
-                f"Full novel draft:\n\n{chunk_text}\n\n"
-                f"Canon memory:\n\n{canon_memory_block}\n\n"
-                f"World rules:\n\n{world_rules_block}"
-            )
-            for chunk_text in chunked_blocks
-        ]
-        report = run_full_novel_processor(
+        analysis_payload = (
+            f"Full novel draft:\n\n{manuscript_text}\n\n"
+            f"Canon memory:\n\n{canon_memory_block}\n\n"
+            f"World rules:\n\n{world_rules_block}"
+        )
+        report = run_chunked_analysis_pipeline(
+            raw_text=analysis_payload,
+            user_prompt=BOOK_INTEGRITY_SYSTEM_PROMPT,
             client=client,
-            command_name="/book-integrity",
-            chunk_system_prompt=BOOK_INTEGRITY_SYSTEM_PROMPT,
-            synthesis_system_prompt=(
-                "You are combining multiple analysis reports into one final coherent report.\n\n"
-                "Rules:\n"
-                "- Remove duplicate issues\n"
-                "- Merge similar findings\n"
-                "- Preserve factual accuracy\n"
-                "- Maintain bullet structure\n"
-                "- Do NOT invent new issues\n"
-                "- Do NOT give writing advice unless original command allows it."
-            ),
-            chunks=analysis_chunks,
-            temperature=CONTINUITY_TEMPERATURE,
-            task_type="book_analysis",
         )
     except Exception as exc:  # Keep terminal app stable for the user.
         print(f"Book integrity analysis failed: {exc}")
@@ -3512,27 +3594,19 @@ def handle_world_consistency(client: Any) -> None:
 
     full_manuscript_text = "\n\n".join(chapter_blocks)
     print_large_manuscript_warning_if_needed(full_manuscript_text)
-    chunk_blocks = [
-        (
-            f"Canon memory:\n\n{canon_memory}\n\n"
-            f"World rules:\n\n{world_rules}\n\n"
-            f"Novel chunk:\n\n{chunk_text}"
-        )
-        for chunk_text in split_manuscript_into_chunks(full_manuscript_text)
-    ]
-    if not chunk_blocks:
+    if not split_manuscript_into_chunks(full_manuscript_text):
         print("No chapter text found.")
         return
 
     try:
-        final_report = run_full_novel_processor(
+        final_report = run_chunked_analysis_pipeline(
+            raw_text=(
+                f"Canon memory:\n\n{canon_memory}\n\n"
+                f"World rules:\n\n{world_rules}\n\n"
+                f"Full novel draft:\n\n{full_manuscript_text}"
+            ),
+            user_prompt=WORLD_CONSISTENCY_SYNTHESIS_SYSTEM_PROMPT,
             client=client,
-            command_name="/world-consistency",
-            chunk_system_prompt=WORLD_CONSISTENCY_CHUNK_SYSTEM_PROMPT,
-            synthesis_system_prompt=WORLD_CONSISTENCY_SYNTHESIS_SYSTEM_PROMPT,
-            chunks=chunk_blocks,
-            temperature=CONTINUITY_TEMPERATURE,
-            task_type="logic_audit",
         ).strip()
     except Exception as exc:  # Keep terminal app stable for the user.
         print(f"World consistency audit failed: {exc}")
@@ -3585,26 +3659,18 @@ def handle_character_consistency(client: Any) -> None:
 
     full_manuscript_text = "\n\n".join(chapter_blocks)
     print_large_manuscript_warning_if_needed(full_manuscript_text)
-    chunk_blocks = [
-        (
-            f"Canon memory:\n\n{canon_memory}\n\n"
-            f"Novel chunk:\n\n{chunk_text}"
-        )
-        for chunk_text in split_manuscript_into_chunks(full_manuscript_text)
-    ]
-    if not chunk_blocks:
+    if not split_manuscript_into_chunks(full_manuscript_text):
         print("No chapter text found.")
         return
 
     try:
-        final_report = run_full_novel_processor(
+        final_report = run_chunked_analysis_pipeline(
+            raw_text=(
+                f"Canon memory:\n\n{canon_memory}\n\n"
+                f"Full novel draft:\n\n{full_manuscript_text}"
+            ),
+            user_prompt=CHARACTER_CONSISTENCY_SYNTHESIS_SYSTEM_PROMPT,
             client=client,
-            command_name="/character-consistency",
-            chunk_system_prompt=CHARACTER_CONSISTENCY_CHUNK_SYSTEM_PROMPT,
-            synthesis_system_prompt=CHARACTER_CONSISTENCY_SYNTHESIS_SYSTEM_PROMPT,
-            chunks=chunk_blocks,
-            temperature=CONTINUITY_TEMPERATURE,
-            task_type="logic_audit",
         ).strip()
     except Exception as exc:  # Keep terminal app stable for the user.
         print(f"Character consistency audit failed: {exc}")
@@ -4191,23 +4257,10 @@ def handle_draft_pass(client: Any, command_text: str = "") -> None:
                 dimension_name=dimension_name,
                 dimension_instructions=dimension_instructions,
             )
-            result = run_full_novel_processor(
+            result = run_chunked_analysis_pipeline(
+                raw_text="\n\n".join(chapter_chunks),
+                user_prompt=draft_system_prompt,
                 client=client,
-                command_name="/draft-pass full",
-                chunk_system_prompt=draft_system_prompt,
-                synthesis_system_prompt=(
-                    "You are combining multiple analysis reports into one final coherent report.\n\n"
-                    "Rules:\n"
-                    "- Remove duplicate issues\n"
-                    "- Merge similar findings\n"
-                    "- Preserve factual accuracy\n"
-                    "- Maintain bullet structure\n"
-                    "- Do NOT invent new issues\n"
-                    "- Do NOT give writing advice unless original command allows it."
-                ),
-                chunks=chapter_chunks,
-                temperature=DRAFT_PASS_TEMPERATURE,
-                task_type="logic_audit",
             )
         else:
             draft_system_prompt = DRAFT_PASS_SYSTEM_PROMPT_TEMPLATE.format(
@@ -5705,7 +5758,7 @@ def handle_export_book_docx() -> None:
 def print_welcome() -> None:
     """Show a simple startup message."""
     print("Novel AI Assistant")
-    print(f"Model: {MODEL_NAME}")
+    print(f"Default model route: {MODEL_ROUTER[DEFAULT_TASK_TYPE]}")
     print(f"Script path: {NOVEL_AI_SCRIPT_PATH}")
     print(f"Project path: {NOVEL_PROJECT_DIR}")
     print("Type /help for commands or type exit to quit.")
