@@ -110,6 +110,7 @@ MAX_PIPELINE_REASONING_CHARS = 16000
 # - Router usage through call_ai() is mandatory for all model requests.
 # - Chunk size adapts dynamically for session-level optimisation.
 # - Telemetry persists through session runtime for optimisation and diagnostics.
+# - Confidence score reflects pipeline stability, not narrative quality.
 SYSTEM_TELEMETRY = {
     "extraction_times": [],
     "reasoning_times": [],
@@ -1921,56 +1922,62 @@ def print_chunk_progress_bar(current: int, total: int, width: int = 28) -> None:
 
 def get_adaptive_chunk_size() -> int:
     """Return the current adaptive chunk size."""
-    current = int(CHUNK_OPTIMISER.get("current_size", DEFAULT_ANALYSIS_CHUNK_WORDS))
+    current = int(CHUNK_OPTIMISER.get("current_size", 6000))
     return max(CHUNK_OPTIMISER["min_size"], min(CHUNK_OPTIMISER["max_size"], current))
 
 
-def adapt_chunk_size() -> None:
-    """Learn chunk sizing from extraction timing history and print next target."""
-    history = CHUNK_OPTIMISER["history"][-6:]
-    if not history:
-        print(f"[Chunk optimiser] size remains {CHUNK_OPTIMISER['current_size']} words")
+def adapt_chunk_size(total_time: float, chunk_count: int) -> None:
+    """Learn chunk sizing from recent runtime telemetry and print next target."""
+    # Developer note: Chunk size adapts automatically based on observed latency.
+    if chunk_count <= 0:
         return
 
-    average_chunk_time = sum(history) / len(history)
+    avg_total = total_time / chunk_count
+    CHUNK_OPTIMISER["history"].append(avg_total)
+    recent = CHUNK_OPTIMISER["history"][-5:]
+    avg_recent = sum(recent) / len(recent)
     current_size = get_adaptive_chunk_size()
-    if average_chunk_time > 7.0:
-        current_size = max(CHUNK_OPTIMISER["min_size"], int(current_size * 0.9))
-    elif average_chunk_time < 2.5:
-        current_size = min(CHUNK_OPTIMISER["max_size"], int(current_size * 1.1))
-
-    CHUNK_OPTIMISER["current_size"] = current_size
-    print(
-        f"[Chunk optimiser] avg chunk extraction {average_chunk_time:.2f}s -> "
-        f"new chunk size {current_size} words"
+    if avg_recent < 4.0:
+        current_size += 1000
+    elif avg_recent > 8.0:
+        current_size -= 1000
+    CHUNK_OPTIMISER["current_size"] = max(
+        CHUNK_OPTIMISER["min_size"],
+        min(CHUNK_OPTIMISER["max_size"], current_size),
     )
+    print(f"[Adaptive chunk size now: {CHUNK_OPTIMISER['current_size']}]")
 
 
-def calculate_confidence() -> float:
-    """Calculate AI confidence score from fallback usage, chunking, and stage timings."""
-    fallback_penalty = 0.2 if LAST_PIPELINE_STATS.get("used_fallback") else 0.0
-    chunk_count = max(int(LAST_PIPELINE_STATS.get("chunk_count", 0)), 1)
-    chunk_penalty = min(0.18, (chunk_count - 1) * 0.02)
-    extraction = float(LAST_PIPELINE_STATS.get("extraction_time", 0.0))
-    reasoning = float(LAST_PIPELINE_STATS.get("reasoning_time", 0.0))
-    final = float(LAST_PIPELINE_STATS.get("final_time", 0.0))
-    total = extraction + reasoning + final
-    timing_penalty = 0.0
-    if total > 0:
-        final_ratio = final / total
-        reasoning_ratio = reasoning / total
-        if final_ratio > 0.7:
-            timing_penalty += 0.08
-        if reasoning_ratio < 0.15:
-            timing_penalty += 0.06
-    confidence = max(0.0, min(1.0, 1.0 - fallback_penalty - chunk_penalty - timing_penalty))
-    return confidence
+def calculate_confidence(
+    extraction_time: float,
+    reasoning_time: float,
+    final_time: float,
+    fallback_triggered: bool,
+    chunk_count: int,
+) -> int:
+    """Calculate pipeline confidence score from runtime stability heuristics."""
+    score = 100
+    if fallback_triggered:
+        score -= 25
+    if chunk_count > 20:
+        score -= 10
+    if reasoning_time > final_time * 1.5:
+        score -= 10
+    if extraction_time < 0.5:
+        score -= 5
+    return max(score, 40)
 
 
 def print_pipeline_confidence() -> None:
     """Print confidence score after pipeline report output."""
-    confidence = calculate_confidence() * 100
-    print(f"AI confidence score: {confidence:.1f}%")
+    confidence = calculate_confidence(
+        extraction_time=float(LAST_PIPELINE_STATS.get("extraction_time", 0.0)),
+        reasoning_time=float(LAST_PIPELINE_STATS.get("reasoning_time", 0.0)),
+        final_time=float(LAST_PIPELINE_STATS.get("final_time", 0.0)),
+        fallback_triggered=bool(LAST_PIPELINE_STATS.get("used_fallback", False)),
+        chunk_count=int(LAST_PIPELINE_STATS.get("chunk_count", 0)),
+    )
+    print(f"[AI analysis confidence: {confidence}%]")
 
 
 def print_large_manuscript_warning_if_needed(text: str) -> None:
@@ -2169,9 +2176,16 @@ def chunk_text_blocks(blocks: list[str], max_chars: int = 12000) -> list[str]:
     return build_safe_chunks("\n\n".join(blocks), max_chars=max_chars)
 
 
+def split_text_blocks(raw_text: str, max_chars: int = 12000) -> list[str]:
+    """Split manuscript text into terminal-safe analysis chunks."""
+    return build_safe_chunks(raw_text, max_chars=max_chars)
+
+
 def split_manuscript_into_chunks(full_text: str) -> list[str]:
     """Split manuscript text into safe bounded chunks for full-book analysis."""
-    return split_text_by_word_count(full_text, max_words=get_adaptive_chunk_size())
+    size = CHUNK_OPTIMISER["current_size"]
+    chunks = split_text_blocks(full_text, max_chars=size)
+    return chunks
 
 
 def run_chunked_analysis(
@@ -2961,7 +2975,6 @@ def run_chunked_analysis_pipeline(
             )
         chunk_elapsed = perf_counter() - chunk_start
         extraction_stage_total += chunk_elapsed
-        CHUNK_OPTIMISER["history"].append(chunk_elapsed)
     print("[Stage complete: extraction ✓]")
 
     merged_extraction = "\n\n".join(extracted_blocks).strip()
@@ -3005,7 +3018,8 @@ def run_chunked_analysis_pipeline(
     LAST_PIPELINE_STATS["reasoning_time"] = reasoning_elapsed
     LAST_PIPELINE_STATS["final_time"] = final_elapsed
     print("[Stage complete: final synthesis ✓]")
-    adapt_chunk_size()
+    total_time = extraction_stage_total + reasoning_elapsed + final_elapsed
+    adapt_chunk_size(total_time, len(chunks))
 
     return final_output
 
