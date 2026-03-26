@@ -9,6 +9,7 @@ from collections import Counter, OrderedDict
 from copy import deepcopy
 from datetime import datetime, timedelta
 from pathlib import Path
+from time import perf_counter
 from typing import Any, Callable
 
 
@@ -86,6 +87,8 @@ MAX_SCENE_SUMMARIES = 5
 MAX_CONVERSATION_TURNS = 6
 MAX_CANON_CHARACTERS = 12000
 DEFAULT_ANALYSIS_CHUNK_WORDS = 6000
+MAX_PIPELINE_EXTRACTION_CHARS = 12000
+MAX_PIPELINE_REASONING_CHARS = 16000
 
 MAIN_SYSTEM_PROMPT = """You are a thoughtful AI novel-writing assistant.
 Help the user think through story ideas, scenes, structure, tone, character, and prose.
@@ -1970,28 +1973,82 @@ def run_full_novel_processor(
     temperature: float = CONTINUITY_TEMPERATURE,
     task_type: str = "continuity_check",
 ) -> str:
-    """Run FULL_NOVEL_PROCESSOR chunk pass + synthesis + logging."""
-    summaries = process_chunks(
-        client=client,
-        system_prompt=chunk_system_prompt,
-        chunks=chunks,
-        temperature=temperature,
-        task_type=task_type,
-    )
-
-    if not summaries:
+    """Run FULL_NOVEL_PROCESSOR using staged extraction, reasoning synthesis, then one final analysis."""
+    ordered_chunks = [chunk.strip() for chunk in chunks if chunk.strip()]
+    if not ordered_chunks:
         write_full_novel_processor_log(command_name, len(chunks), False)
         return ""
 
-    final_output = synthesise_chunk_summaries(
-        client=client,
-        system_prompt=synthesis_system_prompt,
-        summaries=summaries,
-        temperature=temperature,
-        task_type=task_type,
+    extracted_chunks: list[str] = []
+    for chunk_index, chunk_text in enumerate(ordered_chunks, start=1):
+        print(f"Processing chunk {chunk_index} / {len(ordered_chunks)}")
+        stage_start = perf_counter()
+        extraction_prompt = build_extraction_prompt(chunk_text)
+        try:
+            extracted = call_ai(
+                "canon_extract",
+                extraction_prompt,
+                client=client,
+                temperature=temperature,
+            ).strip()
+        except Exception:
+            extracted = ""
+        if not extracted:
+            extracted = chunk_text
+        extracted_chunks.append(
+            truncate_for_pipeline(extracted, MAX_PIPELINE_EXTRACTION_CHARS)
+        )
+        log_pipeline_stage_timing(
+            f"{command_name}:chunk_{chunk_index}_extraction",
+            perf_counter() - stage_start,
+        )
+
+    extracted_payload = "\n\n".join(
+        f"Chunk {index} extracted facts:\n{summary}"
+        for index, summary in enumerate(extracted_chunks, start=1)
     )
+
+    reasoning_start = perf_counter()
+    reasoning_prompt = build_reasoning_prompt(extracted_payload)
+    try:
+        reasoning_report = call_ai(
+            "logic_audit",
+            reasoning_prompt,
+            client=client,
+            temperature=temperature,
+        ).strip()
+    except Exception:
+        reasoning_report = ""
+    if not reasoning_report:
+        reasoning_report = extracted_payload
+    reasoning_report = truncate_for_pipeline(reasoning_report, MAX_PIPELINE_REASONING_CHARS)
+    log_pipeline_stage_timing(f"{command_name}:reasoning_synthesis", perf_counter() - reasoning_start)
+
+    final_start = perf_counter()
+    final_prompt = build_final_analysis_prompt(
+        reasoning_report=reasoning_report,
+        user_prompt=synthesis_system_prompt,
+    )
+    try:
+        final_output = call_ai(
+            "book_analysis",
+            final_prompt,
+            client=client,
+            temperature=temperature,
+        )
+    except Exception:
+        final_output = ""
+    if not final_output.strip():
+        final_output = call_ai(
+            "canon_extract",
+            final_prompt,
+            client=client,
+            temperature=temperature,
+        )
+    log_pipeline_stage_timing(f"{command_name}:final_analysis", perf_counter() - final_start)
+
     success = bool(final_output.strip())
-    write_full_novel_processor_log(command_name, len(chunks), success)
+    write_full_novel_processor_log(command_name, len(ordered_chunks), success)
     return final_output
 
 
@@ -2529,6 +2586,139 @@ def request_chat_completion(
         client=client,
         temperature=temperature,
     ).strip()
+
+
+def truncate_for_pipeline(text: str, limit: int) -> str:
+    """Safely truncate stage outputs to control downstream token growth."""
+    cleaned = clean_terminal_text(text).strip()
+    if len(cleaned) <= limit:
+        return cleaned
+    return cleaned[:limit].rstrip() + "\n...[truncated]"
+
+
+def log_pipeline_stage_timing(stage_name: str, elapsed_seconds: float) -> None:
+    """Persist pipeline stage timings for performance visibility."""
+    timestamp = datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S UTC")
+    try:
+        FULL_NOVEL_PROCESSOR_LOG_DIR.mkdir(parents=True, exist_ok=True)
+        with FULL_NOVEL_PROCESSOR_LOG_PATH.open("a", encoding="utf-8") as handle:
+            handle.write(
+                f"{timestamp} | pipeline_stage={stage_name} | "
+                f"duration={elapsed_seconds:.3f}s\n"
+            )
+    except OSError:
+        return
+
+
+def build_extraction_prompt(raw_text: str) -> list[dict[str, str]]:
+    """Build Stage 1 extraction prompt."""
+    return [
+        {
+            "role": "system",
+            "content": (
+                "Extract the key factual points, entities, constraints, and unresolved states.\n"
+                "Return concise structured bullets only.\n"
+                "Do not perform final analysis."
+            ),
+        },
+        {"role": "user", "content": raw_text},
+    ]
+
+
+def build_reasoning_prompt(extracted_text: str) -> list[dict[str, str]]:
+    """Build Stage 2 logical reasoning prompt."""
+    return [
+        {
+            "role": "system",
+            "content": (
+                "Perform a logical audit on the extracted facts.\n"
+                "Identify contradictions, causality breaks, missing links, and risk points.\n"
+                "Return a compact reasoning report."
+            ),
+        },
+        {"role": "user", "content": extracted_text},
+    ]
+
+
+def build_final_analysis_prompt(reasoning_report: str, user_prompt: str) -> list[dict[str, str]]:
+    """Build Stage 3 final narrative analysis prompt."""
+    return [
+        {"role": "system", "content": user_prompt},
+        {
+            "role": "user",
+            "content": (
+                "Reasoning report:\n\n"
+                f"{reasoning_report}\n\n"
+                "Generate the final analysis output."
+            ),
+        },
+    ]
+
+
+def run_analysis_pipeline(
+    raw_text: str,
+    user_prompt: str,
+    *,
+    client: Any,
+    temperature: float | None = None,
+) -> str:
+    """Run extraction -> reasoning -> final analysis pipeline with graceful fallbacks."""
+    # Stage 1 — Extraction
+    stage_start = perf_counter()
+    extraction_prompt = build_extraction_prompt(raw_text)
+    try:
+        extracted = call_ai(
+            "canon_extract",
+            extraction_prompt,
+            client=client,
+            temperature=temperature,
+        ).strip()
+    except Exception:
+        extracted = ""
+    if not extracted:
+        extracted = raw_text
+    extracted = truncate_for_pipeline(extracted, MAX_PIPELINE_EXTRACTION_CHARS)
+    log_pipeline_stage_timing("extraction", perf_counter() - stage_start)
+
+    # Stage 2 — Reasoning
+    stage_start = perf_counter()
+    reasoning_prompt = build_reasoning_prompt(extracted)
+    try:
+        reasoning_report = call_ai(
+            "logic_audit",
+            reasoning_prompt,
+            client=client,
+            temperature=temperature,
+        ).strip()
+    except Exception:
+        reasoning_report = ""
+    if not reasoning_report:
+        reasoning_report = extracted
+    reasoning_report = truncate_for_pipeline(reasoning_report, MAX_PIPELINE_REASONING_CHARS)
+    log_pipeline_stage_timing("reasoning", perf_counter() - stage_start)
+
+    # Stage 3 — Final Analysis
+    stage_start = perf_counter()
+    final_prompt = build_final_analysis_prompt(reasoning_report, user_prompt)
+    try:
+        final_output = call_ai(
+            "book_analysis",
+            final_prompt,
+            client=client,
+            temperature=temperature,
+        ).strip()
+    except Exception:
+        final_output = ""
+    if not final_output:
+        fallback_prompt = build_final_analysis_prompt(reasoning_report or raw_text, user_prompt)
+        final_output = call_ai(
+            "canon_extract",
+            fallback_prompt,
+            client=client,
+            temperature=temperature,
+        ).strip()
+    log_pipeline_stage_timing("final_analysis", perf_counter() - stage_start)
+    return final_output
 
 
 # ============================================================
@@ -3164,22 +3354,21 @@ def handle_continuity_check(client: Any) -> None:
         else "(none)"
     )
     selected_chapter_text = selected_path.read_text(encoding="utf-8").strip()
-    messages = build_continuity_messages(
-        memory_block=memory_block,
-        world_rules_block=world_rules_block,
-        previous_chapter_block=previous_chapter_block,
-        latest_chapter_block=latest_chapter_block,
-        continuity_index_block=continuity_index_block,
-        selected_chapter_name=selected_path.name,
-        selected_chapter_text=selected_chapter_text,
+    analysis_payload = (
+        f"Canon memory:\n\n{memory_block}\n\n"
+        f"World rules:\n\n{world_rules_block}\n\n"
+        f"Continuity index:\n\n{continuity_index_block}\n\n"
+        f"Previous chapter:\n\n{previous_chapter_block}\n\n"
+        f"Latest chapter:\n\n{latest_chapter_block}\n\n"
+        f"Selected chapter ({selected_path.name}):\n\n{selected_chapter_text}"
     )
 
     try:
-        report = request_chat_completion(
+        report = run_analysis_pipeline(
+            raw_text=analysis_payload,
+            user_prompt=CONTINUITY_SYSTEM_PROMPT,
             client=client,
-            messages=messages,
             temperature=CONTINUITY_TEMPERATURE,
-            task_type="continuity_check",
         )
     except Exception as exc:  # Keep terminal app stable for the user.
         print(f"Continuity check failed: {exc}")
@@ -4021,15 +4210,15 @@ def handle_draft_pass(client: Any, command_text: str = "") -> None:
                 task_type="logic_audit",
             )
         else:
-            result = request_chat_completion(
+            draft_system_prompt = DRAFT_PASS_SYSTEM_PROMPT_TEMPLATE.format(
+                dimension_name=dimension_name,
+                dimension_instructions=dimension_instructions,
+            )
+            result = run_analysis_pipeline(
+                raw_text=text_to_analyse,
+                user_prompt=draft_system_prompt,
                 client=client,
-                messages=build_draft_pass_messages(
-                    text_to_analyse=text_to_analyse,
-                    dimension_name=dimension_name,
-                    dimension_instructions=dimension_instructions,
-                ),
                 temperature=DRAFT_PASS_TEMPERATURE,
-                task_type="logic_audit",
             )
     except Exception as exc:  # Keep terminal app stable for the user.
         print(f"Draft pass failed: {exc}")
