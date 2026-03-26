@@ -62,6 +62,7 @@ BRACKETED_PASTE_PATTERN = re.compile(r"(?:\033\[|\^\[\[?)(?:200~|201~|E)|\[\[200
 DISALLOWED_CONTROL_CHAR_PATTERN = re.compile(r"[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]")
 
 MODEL_ROUTER = {
+    "general": "gpt-5.3",
     "research": "gpt-5.3",
     "world_research": "gpt-5.3",
     "book_analysis": "gpt-5.3",
@@ -76,6 +77,7 @@ MODEL_ROUTER = {
 }
 DEFAULT_TASK_TYPE = "canon_extract"
 TEMPERATURE_ROUTER = {
+    "general": 0.8,
     "canon_extract": 0.0,
     "logic_audit": 0.0,
     "timeline_check": 0.0,
@@ -104,8 +106,11 @@ MAX_CANON_CHARACTERS = 12000
 DEFAULT_ANALYSIS_CHUNK_WORDS = 6000
 MAX_PIPELINE_EXTRACTION_CHARS = 12000
 MAX_PIPELINE_REASONING_CHARS = 16000
+PIPELINE_DECISION_SCAFFOLD_WORDS = 250
 
 # Developer architecture note:
+# - Staged cognition architecture has one canonical engine: run_chunked_analysis_pipeline().
+# - run_analysis_pipeline() is a compatibility wrapper that delegates to canonical staged engine.
 # - Large-scale analysis must use chunked staged cognition when text exceeds adaptive thresholds.
 # - Router and telemetry configuration must remain single-source near the top of this file.
 # - Spinner output must not overlap with model/status banners.
@@ -142,10 +147,49 @@ def record_command_runtime(runtime: float) -> None:
         SYSTEM_TELEMETRY["longest_command"] = runtime
 
 
-def should_use_chunked_pipeline(text: str) -> bool:
+def reset_pipeline_stats_for_command() -> None:
+    """Reset per-command pipeline stats so confidence output reflects current command only."""
+    LAST_PIPELINE_STATS.update(
+        {
+            "used_fallback": False,
+            "chunk_count": 0,
+            "extraction_time": 0.0,
+            "reasoning_time": 0.0,
+            "final_time": 0.0,
+        }
+    )
+
+
+def assert_router_configuration_integrity() -> None:
+    """Developer safeguard for routing and temperature map integrity."""
+    missing_temperature = sorted(set(MODEL_ROUTER) - set(TEMPERATURE_ROUTER))
+    if missing_temperature:
+        raise AssertionError(
+            "TEMPERATURE_ROUTER missing task types: " + ", ".join(missing_temperature)
+        )
+
+
+def assert_single_configuration_blocks() -> None:
+    """Developer safeguard preventing duplicate top-level routing config blocks."""
+    try:
+        source_text = Path(__file__).read_text(encoding="utf-8")
+    except OSError:
+        return
+    if source_text.count("MODEL_ROUTER =") != 1:
+        raise AssertionError("Developer architecture error: duplicate MODEL_ROUTER blocks detected.")
+    if source_text.count("TEMPERATURE_ROUTER =") != 1:
+        raise AssertionError("Developer architecture error: duplicate TEMPERATURE_ROUTER blocks detected.")
+
+
+def should_use_chunked_pipeline(*payload_parts: str) -> bool:
     """Decide if large-scale cognition should run through the chunked pipeline."""
     threshold_words = get_adaptive_chunk_size()
-    return len(text.split()) > threshold_words
+    total_words = PIPELINE_DECISION_SCAFFOLD_WORDS
+    for part in payload_parts:
+        cleaned = clean_terminal_text(part).strip()
+        if cleaned:
+            total_words += len(cleaned.split())
+    return total_words > threshold_words
 
 MAIN_SYSTEM_PROMPT = """You are a thoughtful AI novel-writing assistant.
 Help the user think through story ideas, scenes, structure, tone, character, and prose.
@@ -2210,30 +2254,11 @@ def run_chunked_analysis(
     *,
     temperature: float = CONTINUITY_TEMPERATURE,
 ) -> str:
-    """Backward-compatible wrapper around FULL_NOVEL_PROCESSOR helpers."""
-    summaries = process_chunks(
+    """Deprecated legacy wrapper; routes to canonical run_chunked_analysis_pipeline()."""
+    return run_chunked_analysis_pipeline(
+        raw_text="\n\n".join(chunk for chunk in chunks if chunk.strip()),
+        user_prompt=system_prompt,
         client=client,
-        system_prompt=system_prompt,
-        chunks=chunks,
-        temperature=temperature,
-    )
-    if not summaries:
-        return ""
-
-    synthesis_system_prompt = (
-        "You are combining multiple analysis reports into one final coherent report.\n\n"
-        "Rules:\n"
-        "- Remove duplicate issues\n"
-        "- Merge similar findings\n"
-        "- Preserve factual accuracy\n"
-        "- Maintain bullet structure\n"
-        "- Do NOT invent new issues\n"
-        "- Do NOT give writing advice unless original command allows it."
-    )
-    return synthesise_chunk_summaries(
-        client=client,
-        system_prompt=synthesis_system_prompt,
-        summaries=summaries,
         temperature=temperature,
     )
 
@@ -2723,7 +2748,12 @@ def call_ai(
     temperature: float | None = None,
 ) -> str:
     """Route AI requests to a model by task type with fallback safety."""
-    resolved_task_type = task_type if task_type in MODEL_ROUTER else DEFAULT_TASK_TYPE
+    if task_type not in MODEL_ROUTER:
+        raise ValueError(
+            f"Developer routing error: unsupported task_type '{task_type}'. "
+            f"Known task types: {', '.join(sorted(MODEL_ROUTER.keys()))}"
+        )
+    resolved_task_type = task_type
     model_chain = [MODEL_ROUTER[resolved_task_type]]
     if resolved_task_type == "book_analysis":
         for fallback_task in ("logic_audit", "canon_extract"):
@@ -2849,6 +2879,23 @@ def build_final_analysis_prompt(reasoning_report: str, user_prompt: str) -> list
     ]
 
 
+def compress_reasoning_payload_placeholder(payload: str) -> str:
+    """Placeholder hook for future reasoning payload compression."""
+    return payload
+
+
+def select_pipeline_depth_placeholder(raw_text: str) -> int:
+    """Placeholder hook for future adaptive pipeline depth."""
+    _ = raw_text
+    return 3
+
+
+def lookup_chunk_cache_placeholder(chunk_text: str) -> str | None:
+    """Placeholder hook for future chunk result caching."""
+    _ = chunk_text
+    return None
+
+
 def run_analysis_pipeline(
     raw_text: str,
     user_prompt: str,
@@ -2856,96 +2903,13 @@ def run_analysis_pipeline(
     client: Any,
     temperature: float | None = None,
 ) -> str:
-    """Run extraction -> reasoning -> final analysis pipeline with graceful fallbacks."""
-    command_start = perf_counter()
-    LAST_PIPELINE_STATS.update(
-        {
-            "used_fallback": False,
-            "chunk_count": 1,
-            "extraction_time": 0.0,
-            "reasoning_time": 0.0,
-            "final_time": 0.0,
-        }
+    """Compatibility wrapper delegating to canonical staged cognition pipeline."""
+    return run_chunked_analysis_pipeline(
+        raw_text=raw_text,
+        user_prompt=user_prompt,
+        client=client,
+        temperature=temperature,
     )
-    # Backward-compatible single-block staged pipeline.
-    # Stage 1 — Extraction
-    stage_start = perf_counter()
-    extraction_prompt = build_extraction_prompt(raw_text)
-    try:
-        extracted = call_ai(
-            "canon_extract",
-            extraction_prompt,
-            client=client,
-            temperature=temperature,
-        ).strip()
-    except Exception:
-        extracted = ""
-    if not extracted:
-        extracted = raw_text
-    extracted = truncate_for_pipeline(extracted, MAX_PIPELINE_EXTRACTION_CHARS)
-    extraction_elapsed = perf_counter() - stage_start
-    log_pipeline_stage_timing("extraction", extraction_elapsed)
-    SYSTEM_TELEMETRY["extraction_times"].append(extraction_elapsed)
-    LAST_PIPELINE_STATS["extraction_time"] = extraction_elapsed
-
-    # Stage 2 — Reasoning
-    stage_start = perf_counter()
-    reasoning_prompt = build_reasoning_prompt(extracted)
-    try:
-        reasoning_report = call_ai(
-            "logic_audit",
-            reasoning_prompt,
-            client=client,
-            temperature=temperature,
-        ).strip()
-    except Exception:
-        reasoning_report = ""
-    if not reasoning_report:
-        reasoning_report = extracted
-    reasoning_report = truncate_for_pipeline(reasoning_report, MAX_PIPELINE_REASONING_CHARS)
-    reasoning_elapsed = perf_counter() - stage_start
-    log_pipeline_stage_timing("reasoning", reasoning_elapsed)
-    SYSTEM_TELEMETRY["reasoning_times"].append(reasoning_elapsed)
-    LAST_PIPELINE_STATS["reasoning_time"] = reasoning_elapsed
-
-    # Stage 3 — Final Analysis
-    stage_start = perf_counter()
-    print("[Final synthesis stage]")
-    final_prompt = build_final_analysis_prompt(reasoning_report, user_prompt)
-    try:
-        final_output = call_ai(
-            "book_analysis",
-            final_prompt,
-            client=client,
-            temperature=temperature,
-        ).strip()
-    except Exception:
-        final_output = ""
-    if not final_output:
-        try:
-            final_output = call_ai(
-                "logic_audit",
-                final_prompt,
-                client=client,
-                temperature=temperature,
-            ).strip()
-        except Exception:
-            final_output = ""
-    if not final_output:
-        fallback_prompt = build_final_analysis_prompt(reasoning_report or raw_text, user_prompt)
-        final_output = call_ai(
-            "canon_extract",
-            fallback_prompt,
-            client=client,
-            temperature=temperature,
-        ).strip()
-    final_elapsed = perf_counter() - stage_start
-    log_pipeline_stage_timing("final_analysis", final_elapsed)
-    SYSTEM_TELEMETRY["final_times"].append(final_elapsed)
-    LAST_PIPELINE_STATS["final_time"] = final_elapsed
-    total_time = perf_counter() - command_start
-    record_command_runtime(total_time)
-    return final_output
 
 
 def run_chunked_analysis_pipeline(
@@ -2953,10 +2917,10 @@ def run_chunked_analysis_pipeline(
     user_prompt: str,
     *,
     client: Any,
+    temperature: float | None = None,
 ) -> str:
     """Run chunk-aware extraction -> reasoning -> final analysis for large manuscripts."""
     # Developer note: All future large-scale cognition features must use this chunked pipeline.
-    command_start = perf_counter()
     LAST_PIPELINE_STATS.update(
         {
             "used_fallback": False,
@@ -2967,10 +2931,9 @@ def run_chunked_analysis_pipeline(
         }
     )
     chunks = split_manuscript_into_chunks(raw_text)
+    _pipeline_depth = select_pipeline_depth_placeholder(raw_text)
     LAST_PIPELINE_STATS["chunk_count"] = len(chunks)
     if not chunks:
-        total_time = perf_counter() - command_start
-        record_command_runtime(total_time)
         return ""
     extracted_blocks: list[str] = []
     extraction_stage_total = 0.0
@@ -2979,11 +2942,18 @@ def run_chunked_analysis_pipeline(
         print_chunk_progress_bar(chunk_index, len(chunks))
         chunk_start = perf_counter()
         extraction_prompt = build_extraction_prompt(chunk)
+        cached_extraction = lookup_chunk_cache_placeholder(chunk)
+        if cached_extraction:
+            extracted_blocks.append(truncate_for_pipeline(cached_extraction, MAX_PIPELINE_EXTRACTION_CHARS))
+            chunk_elapsed = perf_counter() - chunk_start
+            extraction_stage_total += chunk_elapsed
+            continue
         try:
             extracted = call_ai(
                 "canon_extract",
                 extraction_prompt,
                 client=client,
+                temperature=temperature,
             ).strip()
         except Exception:
             extracted = ""
@@ -3002,6 +2972,7 @@ def run_chunked_analysis_pipeline(
     merged_extraction = "\n\n".join(extracted_blocks).strip()
     if not merged_extraction:
         merged_extraction = truncate_for_pipeline(raw_text, MAX_PIPELINE_EXTRACTION_CHARS)
+    merged_extraction = compress_reasoning_payload_placeholder(merged_extraction)
 
     reasoning_start = perf_counter()
     reasoning_prompt = build_reasoning_prompt(merged_extraction)
@@ -3010,11 +2981,13 @@ def run_chunked_analysis_pipeline(
             "logic_audit",
             reasoning_prompt,
             client=client,
+            temperature=temperature,
         ).strip()
     except Exception:
         reasoning_report = ""
     if not reasoning_report:
         reasoning_report = merged_extraction
+    reasoning_report = compress_reasoning_payload_placeholder(reasoning_report)
     reasoning_report = truncate_for_pipeline(reasoning_report, MAX_PIPELINE_REASONING_CHARS)
     reasoning_elapsed = perf_counter() - reasoning_start
     print("[Stage complete: reasoning ✓]")
@@ -3023,14 +2996,28 @@ def run_chunked_analysis_pipeline(
     print("[Final synthesis stage]")
     final_prompt = build_final_analysis_prompt(reasoning_report, user_prompt)
     final_output = ""
-    try:
-        final_output = call_ai(
-            "book_analysis",
-            final_prompt,
-            client=client,
-        ).strip()
-    except Exception:
-        final_output = ""
+    final_fallback_chain: list[tuple[str, list[dict[str, str]]]] = [
+        ("book_analysis", final_prompt),
+        ("logic_audit", final_prompt),
+        (
+            "canon_extract",
+            build_final_analysis_prompt(reasoning_report or merged_extraction or raw_text, user_prompt),
+        ),
+    ]
+    for fallback_index, (fallback_task, fallback_prompt) in enumerate(final_fallback_chain):
+        try:
+            final_output = call_ai(
+                fallback_task,
+                fallback_prompt,
+                client=client,
+                temperature=temperature,
+            ).strip()
+        except Exception:
+            final_output = ""
+        if final_output:
+            if fallback_index > 0:
+                LAST_PIPELINE_STATS["used_fallback"] = True
+            break
 
     final_elapsed = perf_counter() - final_start
     SYSTEM_TELEMETRY["extraction_times"].append(extraction_stage_total)
@@ -3042,8 +3029,6 @@ def run_chunked_analysis_pipeline(
     print("[Stage complete: final synthesis ✓]")
     total_time = extraction_stage_total + reasoning_elapsed + final_elapsed
     adapt_chunk_size(total_time, len(chunks))
-    record_command_runtime(total_time)
-
     return final_output
 
 
@@ -3747,7 +3732,12 @@ def handle_book_integrity(client: Any) -> None:
             f"Canon memory:\n\n{canon_memory_block}\n\n"
             f"World rules:\n\n{world_rules_block}"
         )
-        if should_use_chunked_pipeline(manuscript_text):
+        if should_use_chunked_pipeline(
+            manuscript_text,
+            canon_memory_block,
+            world_rules_block,
+            BOOK_INTEGRITY_SYSTEM_PROMPT,
+        ):
             report = run_chunked_analysis_pipeline(
                 raw_text=analysis_payload,
                 user_prompt=BOOK_INTEGRITY_SYSTEM_PROMPT,
@@ -3839,7 +3829,12 @@ def handle_world_consistency(client: Any) -> None:
             f"World rules:\n\n{world_rules}\n\n"
             f"Full novel draft:\n\n{full_manuscript_text}"
         )
-        if should_use_chunked_pipeline(full_manuscript_text):
+        if should_use_chunked_pipeline(
+            full_manuscript_text,
+            canon_memory,
+            world_rules,
+            WORLD_CONSISTENCY_SYNTHESIS_SYSTEM_PROMPT,
+        ):
             final_report = run_chunked_analysis_pipeline(
                 raw_text=world_payload,
                 user_prompt=WORLD_CONSISTENCY_SYNTHESIS_SYSTEM_PROMPT,
@@ -3912,7 +3907,11 @@ def handle_character_consistency(client: Any) -> None:
             f"Canon memory:\n\n{canon_memory}\n\n"
             f"Full novel draft:\n\n{full_manuscript_text}"
         )
-        if should_use_chunked_pipeline(full_manuscript_text):
+        if should_use_chunked_pipeline(
+            full_manuscript_text,
+            canon_memory,
+            CHARACTER_CONSISTENCY_SYNTHESIS_SYSTEM_PROMPT,
+        ):
             final_report = run_chunked_analysis_pipeline(
                 raw_text=character_payload,
                 user_prompt=CHARACTER_CONSISTENCY_SYNTHESIS_SYSTEM_PROMPT,
@@ -4196,32 +4195,27 @@ def handle_rebuild_summaries(client: Any) -> None:
 
 def handle_proofread(client: Any) -> None:
     """Proofread pasted text in a fully isolated request."""
-    command_start = perf_counter()
+    print("Paste text to proofread. Type END on a new line when finished.")
+    text_to_proofread = collect_multiline_input(end_marker="END")
+    text_to_proofread = clean_terminal_text(text_to_proofread)
+
+    if not text_to_proofread:
+        print("No text provided.")
+        return
+
     try:
-        print("Paste text to proofread. Type END on a new line when finished.")
-        text_to_proofread = collect_multiline_input(end_marker="END")
-        text_to_proofread = clean_terminal_text(text_to_proofread)
+        result = request_chat_completion(
+            client=client,
+            messages=build_proofread_messages(text_to_proofread),
+            temperature=PROOFREAD_TEMPERATURE,
+            task_type="proofread",
+        )
+    except Exception:  # Keep terminal app stable for the user.
+        print("Proofread failed.")
+        return
 
-        if not text_to_proofread:
-            print("No text provided.")
-            return
-
-        try:
-            result = request_chat_completion(
-                client=client,
-                messages=build_proofread_messages(text_to_proofread),
-                temperature=PROOFREAD_TEMPERATURE,
-                task_type="proofread",
-            )
-        except Exception:  # Keep terminal app stable for the user.
-            print("Proofread failed.")
-            return
-
-        print()
-        print(result)
-    finally:
-        total_time = perf_counter() - command_start
-        record_command_runtime(total_time)
+    print()
+    print(result)
 
 
 
@@ -4264,8 +4258,7 @@ def handle_idea_resurface(client: Any) -> None:
 
     print()
     print(result)
-    if scope_selection == "2":
-        print_pipeline_confidence()
+    return
 
 
 
@@ -4321,63 +4314,58 @@ def handle_chapter_summary(client: Any) -> None:
 
 def handle_recap(client: Any) -> None:
     """Generate a present-moment narrative recap from the latest chapter context."""
-    command_start = perf_counter()
+    ensure_project_files()
+
+    chapter_paths = load_sorted_chapter_paths()
+    if not chapter_paths:
+        print("No chapters found.")
+        return
+
+    latest_chapter_path = chapter_paths[-1]
+    chapter_number = extract_chapter_number(latest_chapter_path)
+    latest_chapter_text = clean_terminal_text(latest_chapter_path.read_text(encoding="utf-8")).strip()
+    if not latest_chapter_text:
+        latest_chapter_text = "(empty)"
+
+    canon_context = load_recap_canon_context()
+    optional_context_blocks: list[str] = []
+    story_state_context = load_optional_recap_context(STORY_STATE_PATH, "Optional story_state.txt")
+    if story_state_context:
+        optional_context_blocks.append(story_state_context)
+    timeline_context = load_optional_recap_context(
+        TIMELINE_THREADS_PATH,
+        "Optional timeline_threads.txt",
+    )
+    if timeline_context:
+        optional_context_blocks.append(timeline_context)
+    optional_context = "\n\n".join(optional_context_blocks) if optional_context_blocks else "(none)"
+
+    recap_messages = [
+        {"role": "system", "content": RECAP_SYSTEM_PROMPT},
+        {
+            "role": "user",
+            "content": (
+                f"Latest chapter number: {chapter_number if chapter_number is not None else '(unknown)'}\n\n"
+                f"Latest chapter text:\n\n{latest_chapter_text}\n\n"
+                f"Scaled canon context:\n\n{canon_context}\n\n"
+                f"Optional context:\n\n{optional_context}"
+            ),
+        },
+    ]
+
     try:
-        ensure_project_files()
-
-        chapter_paths = load_sorted_chapter_paths()
-        if not chapter_paths:
-            print("No chapters found.")
-            return
-
-        latest_chapter_path = chapter_paths[-1]
-        chapter_number = extract_chapter_number(latest_chapter_path)
-        latest_chapter_text = clean_terminal_text(latest_chapter_path.read_text(encoding="utf-8")).strip()
-        if not latest_chapter_text:
-            latest_chapter_text = "(empty)"
-
-        canon_context = load_recap_canon_context()
-        optional_context_blocks: list[str] = []
-        story_state_context = load_optional_recap_context(STORY_STATE_PATH, "Optional story_state.txt")
-        if story_state_context:
-            optional_context_blocks.append(story_state_context)
-        timeline_context = load_optional_recap_context(
-            TIMELINE_THREADS_PATH,
-            "Optional timeline_threads.txt",
+        recap = request_chat_completion(
+            client=client,
+            messages=recap_messages,
+            temperature=RECAP_TEMPERATURE,
+            task_type="recap",
         )
-        if timeline_context:
-            optional_context_blocks.append(timeline_context)
-        optional_context = "\n\n".join(optional_context_blocks) if optional_context_blocks else "(none)"
+    except Exception as exc:  # Keep terminal app stable for the user.
+        print(f"Recap failed: {exc}")
+        return
 
-        recap_messages = [
-            {"role": "system", "content": RECAP_SYSTEM_PROMPT},
-            {
-                "role": "user",
-                "content": (
-                    f"Latest chapter number: {chapter_number if chapter_number is not None else '(unknown)'}\n\n"
-                    f"Latest chapter text:\n\n{latest_chapter_text}\n\n"
-                    f"Scaled canon context:\n\n{canon_context}\n\n"
-                    f"Optional context:\n\n{optional_context}"
-                ),
-            },
-        ]
-
-        try:
-            recap = request_chat_completion(
-                client=client,
-                messages=recap_messages,
-                temperature=RECAP_TEMPERATURE,
-                task_type="recap",
-            )
-        except Exception as exc:  # Keep terminal app stable for the user.
-            print(f"Recap failed: {exc}")
-            return
-
-        print()
-        print(recap)
-    finally:
-        total_time = perf_counter() - command_start
-        record_command_runtime(total_time)
+    print()
+    print(recap)
 
 
 def handle_draft_pass(client: Any, command_text: str = "") -> None:
@@ -4517,21 +4505,21 @@ def handle_draft_pass(client: Any, command_text: str = "") -> None:
         return
 
     try:
-        if scope_selection == "2" and should_use_chunked_pipeline(text_to_analyse):
-            draft_system_prompt = DRAFT_PASS_SYSTEM_PROMPT_TEMPLATE.format(
-                dimension_name=dimension_name,
-                dimension_instructions=dimension_instructions,
-            )
+        draft_system_prompt = DRAFT_PASS_SYSTEM_PROMPT_TEMPLATE.format(
+            dimension_name=dimension_name,
+            dimension_instructions=dimension_instructions,
+        )
+        if scope_selection == "2" and should_use_chunked_pipeline(
+            text_to_analyse,
+            draft_system_prompt,
+        ):
             result = run_chunked_analysis_pipeline(
                 raw_text="\n\n".join(chapter_chunks),
                 user_prompt=draft_system_prompt,
                 client=client,
+                temperature=DRAFT_PASS_TEMPERATURE,
             )
         else:
-            draft_system_prompt = DRAFT_PASS_SYSTEM_PROMPT_TEMPLATE.format(
-                dimension_name=dimension_name,
-                dimension_instructions=dimension_instructions,
-            )
             result = run_analysis_pipeline(
                 raw_text=text_to_analyse,
                 user_prompt=draft_system_prompt,
@@ -5529,337 +5517,317 @@ def handle_story_state() -> None:
 
 def handle_research_topic(client: Any) -> None:
     """Run an isolated factual science research workflow."""
-    command_start = perf_counter()
+    depth_choice = prompt_for_research_choice(
+        "Choose research depth:",
+        RESEARCH_DEPTH_OPTIONS,
+    )
+    if depth_choice is None:
+        return
+
+    style_choice = prompt_for_research_choice(
+        "Choose output style:",
+        RESEARCH_STYLE_OPTIONS,
+    )
+    if style_choice is None:
+        return
+
+    print("Paste research question. Type END on new line when finished.")
+    question = collect_multiline_input(end_marker="END")
+    if not question:
+        print("No research question entered.")
+        return
+
     try:
-        depth_choice = prompt_for_research_choice(
-            "Choose research depth:",
-            RESEARCH_DEPTH_OPTIONS,
+        research_notes = request_chat_completion(
+            client=client,
+            messages=build_research_messages(
+                question=question,
+                depth_choice=depth_choice,
+                style_choice=style_choice,
+            ),
+            temperature=RESEARCH_TEMPERATURE,
+            task_type="research",
         )
-        if depth_choice is None:
-            return
+    except Exception as exc:  # Keep terminal app stable for the user.
+        print(f"Research request failed: {exc}")
+        return
 
-        style_choice = prompt_for_research_choice(
-            "Choose output style:",
-            RESEARCH_STYLE_OPTIONS,
-        )
-        if style_choice is None:
-            return
+    print()
+    print(research_notes)
 
-        print("Paste research question. Type END on new line when finished.")
-        question = collect_multiline_input(end_marker="END")
-        if not question:
-            print("No research question entered.")
-            return
+    if not prompt_for_confirmation("Save this research topic? (y/n)"):
+        return
 
-        try:
-            research_notes = request_chat_completion(
-                client=client,
-                messages=build_research_messages(
-                    question=question,
-                    depth_choice=depth_choice,
-                    style_choice=style_choice,
-                ),
-                temperature=RESEARCH_TEMPERATURE,
-                task_type="research",
-            )
-        except Exception as exc:  # Keep terminal app stable for the user.
-            print(f"Research request failed: {exc}")
-            return
-
+    print("Topic filename (example: neutron_star_collision):")
+    try:
+        filename_input = input("> ").strip()
+    except EOFError:
         print()
-        print(research_notes)
+        return
 
-        if not prompt_for_confirmation("Save this research topic? (y/n)"):
-            return
+    if not filename_input:
+        print("No topic filename entered.")
+        return
 
-        print("Topic filename (example: neutron_star_collision):")
-        try:
-            filename_input = input("> ").strip()
-        except EOFError:
-            print()
-            return
+    safe_topic_name = re.sub(r"[^a-zA-Z0-9_-]+", "_", filename_input).strip("_")
+    if not safe_topic_name:
+        print("Invalid topic filename.")
+        return
 
-        if not filename_input:
-            print("No topic filename entered.")
-            return
+    RESEARCH_DIR.mkdir(parents=True, exist_ok=True)
+    output_path = RESEARCH_DIR / f"{safe_topic_name}.txt"
+    if output_path.exists():
+        timestamp_suffix = datetime.utcnow().strftime("%Y%m%d_%H%M")
+        output_path = RESEARCH_DIR / f"{safe_topic_name}_{timestamp_suffix}.txt"
 
-        safe_topic_name = re.sub(r"[^a-zA-Z0-9_-]+", "_", filename_input).strip("_")
-        if not safe_topic_name:
-            print("Invalid topic filename.")
-            return
+    file_body = (
+        f"TOPIC: {safe_topic_name}\n\n"
+        "QUESTION:\n"
+        f"{question}\n\n"
+        "RESEARCH NOTES:\n"
+        f"{research_notes}\n"
+    )
 
-        RESEARCH_DIR.mkdir(parents=True, exist_ok=True)
-        output_path = RESEARCH_DIR / f"{safe_topic_name}.txt"
-        if output_path.exists():
-            timestamp_suffix = datetime.utcnow().strftime("%Y%m%d_%H%M")
-            output_path = RESEARCH_DIR / f"{safe_topic_name}_{timestamp_suffix}.txt"
+    try:
+        atomic_write(output_path, file_body)
+    except OSError as exc:
+        print(f"Could not save research topic: {exc}")
+        return
 
-        file_body = (
-            f"TOPIC: {safe_topic_name}\n\n"
-            "QUESTION:\n"
-            f"{question}\n\n"
-            "RESEARCH NOTES:\n"
-            f"{research_notes}\n"
-        )
-
-        try:
-            atomic_write(output_path, file_body)
-        except OSError as exc:
-            print(f"Could not save research topic: {exc}")
-            return
-
-        print("Research topic saved.")
-    finally:
-        total_time = perf_counter() - command_start
-        record_command_runtime(total_time)
+    print("Research topic saved.")
 
 
 def handle_research_scene(client: Any) -> None:
     """Run chunk-safe hard-science realism analysis on pasted scene text."""
-    command_start = perf_counter()
+    print("Paste scene text. Type END on new line when finished.")
+    scene_text = collect_multiline_input(end_marker="END")
+    if not scene_text:
+        print("No scene provided.")
+        return
+
+    scene_chunks = chunk_text_blocks([scene_text], max_chars=10000)
+    if not scene_chunks:
+        print("No scene provided.")
+        return
+
+    canon_memory_block = (
+        read_text_file(CANON_MEMORY_PATH)
+        if CANON_MEMORY_PATH.exists()
+        else "(not provided)"
+    )
+    world_rules_block = (
+        read_text_file(WORLD_RULES_PATH)
+        if WORLD_RULES_PATH.exists()
+        else "(not provided)"
+    )
+
     try:
+        chunk_reports: list[str] = []
+        prior_findings = ""
+        for chunk_index, scene_chunk in enumerate(scene_chunks, start=1):
+            if len(scene_chunks) > 1:
+                print(f"[Processing chunk {chunk_index}/{len(scene_chunks)}]")
+            chunk_report = request_chat_completion(
+                client=client,
+                messages=build_research_scene_messages(
+                    scene_chunk=scene_chunk,
+                    canon_memory_block=canon_memory_block,
+                    world_rules_block=world_rules_block,
+                    prior_findings=prior_findings,
+                ),
+                temperature=RESEARCH_SCENE_TEMPERATURE,
+                task_type="research",
+            )
+            chunk_reports.append(chunk_report)
+            prior_findings = "\n\n".join(chunk_reports[-2:])
+
+        if len(chunk_reports) == 1:
+            final_report = chunk_reports[0]
+        else:
+            final_report = request_chat_completion(
+                client=client,
+                messages=[
+                    {"role": "system", "content": RESEARCH_SCENE_SYSTEM_PROMPT},
+                    {
+                        "role": "user",
+                        "content": (
+                            "Merge these chunk-level scientific realism analyses into one final report.\n"
+                            "Keep the exact output structure below. Remove duplicates. Preserve concrete findings.\n"
+                            "Do not add prose rewrites, story suggestions, or narrative critique.\n\n"
+                            "Output format (strict):\n"
+                            "SCIENCE REALISM REPORT\n\n"
+                            "Relevant Real Science\n"
+                            "- bullet points\n\n"
+                            "Realistic Constraints\n"
+                            "- bullet points\n\n"
+                            "Already Realistic Elements\n"
+                            "- bullet points\n\n"
+                            "Unrealistic or Risky Elements\n"
+                            "- bullet points\n\n"
+                            "Scientific Detail Opportunities\n"
+                            "- micro realism ideas\n"
+                            "- instrumentation behaviour\n"
+                            "- environmental reactions\n\n"
+                            + "\n\n".join(
+                                f"Chunk {index} report:\n{chunk_report}"
+                                for index, chunk_report in enumerate(chunk_reports, start=1)
+                            )
+                        ),
+                    },
+                ],
+                temperature=RESEARCH_SCENE_TEMPERATURE,
+                task_type="research",
+            )
+    except Exception as exc:  # Keep terminal app stable for the user.
+        print(f"Research scene analysis failed: {exc}")
+        return
+
+    print()
+    print(final_report)
+
+
+def handle_research_apply(client: Any) -> None:
+    """Apply saved research notes to a scene or chapter for realism conflict auditing."""
+    if not RESEARCH_DIR.exists() or not RESEARCH_DIR.is_dir():
+        print("No research topics found.")
+        return
+
+    topic_files = sorted(path for path in RESEARCH_DIR.iterdir() if path.is_file())
+    if not topic_files:
+        print("No research topics found.")
+        return
+
+    print("Available research topics:")
+    for index, topic_path in enumerate(topic_files, start=1):
+        print(f"{index}. {topic_path.name}")
+
+    print("Select topic number.")
+    try:
+        topic_selection = input("> ").strip()
+    except EOFError:
+        print()
+        return
+
+    if not topic_selection.isdigit():
+        print("Invalid selection.")
+        return
+
+    topic_index = int(topic_selection)
+    if topic_index < 1 or topic_index > len(topic_files):
+        print("Invalid selection.")
+        return
+
+    selected_topic_path = topic_files[topic_index - 1]
+    research_notes = read_text_file(selected_topic_path)
+
+    print("Choose input type:")
+    print("1 = Paste scene")
+    print("2 = Choose chapter file")
+    try:
+        input_type = input("> ").strip()
+    except EOFError:
+        print()
+        return
+
+    scene_text = ""
+    if input_type == "1":
         print("Paste scene text. Type END on new line when finished.")
         scene_text = collect_multiline_input(end_marker="END")
         if not scene_text:
             print("No scene provided.")
             return
-
-        scene_chunks = chunk_text_blocks([scene_text], max_chars=10000)
-        if not scene_chunks:
-            print("No scene provided.")
+    elif input_type == "2":
+        chapter_number = prompt_for_chapter_number("Ask chapter number.")
+        if chapter_number is None:
             return
-
-        canon_memory_block = (
-            read_text_file(CANON_MEMORY_PATH)
-            if CANON_MEMORY_PATH.exists()
-            else "(not provided)"
-        )
-        world_rules_block = (
-            read_text_file(WORLD_RULES_PATH)
-            if WORLD_RULES_PATH.exists()
-            else "(not provided)"
-        )
-
-        try:
-            chunk_reports: list[str] = []
-            prior_findings = ""
-            for chunk_index, scene_chunk in enumerate(scene_chunks, start=1):
-                if len(scene_chunks) > 1:
-                    print(f"[Processing chunk {chunk_index}/{len(scene_chunks)}]")
-                chunk_report = request_chat_completion(
-                    client=client,
-                    messages=build_research_scene_messages(
-                        scene_chunk=scene_chunk,
-                        canon_memory_block=canon_memory_block,
-                        world_rules_block=world_rules_block,
-                        prior_findings=prior_findings,
-                    ),
-                    temperature=RESEARCH_SCENE_TEMPERATURE,
-                    task_type="research",
-                )
-                chunk_reports.append(chunk_report)
-                prior_findings = "\n\n".join(chunk_reports[-2:])
-
-            if len(chunk_reports) == 1:
-                final_report = chunk_reports[0]
-            else:
-                final_report = request_chat_completion(
-                    client=client,
-                    messages=[
-                        {"role": "system", "content": RESEARCH_SCENE_SYSTEM_PROMPT},
-                        {
-                            "role": "user",
-                            "content": (
-                                "Merge these chunk-level scientific realism analyses into one final report.\n"
-                                "Keep the exact output structure below. Remove duplicates. Preserve concrete findings.\n"
-                                "Do not add prose rewrites, story suggestions, or narrative critique.\n\n"
-                                "Output format (strict):\n"
-                                "SCIENCE REALISM REPORT\n\n"
-                                "Relevant Real Science\n"
-                                "- bullet points\n\n"
-                                "Realistic Constraints\n"
-                                "- bullet points\n\n"
-                                "Already Realistic Elements\n"
-                                "- bullet points\n\n"
-                                "Unrealistic or Risky Elements\n"
-                                "- bullet points\n\n"
-                                "Scientific Detail Opportunities\n"
-                                "- micro realism ideas\n"
-                                "- instrumentation behaviour\n"
-                                "- environmental reactions\n\n"
-                                + "\n\n".join(
-                                    f"Chunk {index} report:\n{chunk_report}"
-                                    for index, chunk_report in enumerate(chunk_reports, start=1)
-                                )
-                            ),
-                        },
-                    ],
-                    temperature=RESEARCH_SCENE_TEMPERATURE,
-                    task_type="research",
-                )
-        except Exception as exc:  # Keep terminal app stable for the user.
-            print(f"Research scene analysis failed: {exc}")
+        chapter_path = CHAPTERS_DIR / f"chapter_{chapter_number}.txt"
+        if not chapter_path.exists() or not chapter_path.is_file():
+            print("Chapter file not found.")
             return
+        scene_text = clean_terminal_text(chapter_path.read_text(encoding="utf-8"))
+        if not scene_text:
+            print("Chapter file is empty.")
+            return
+    else:
+        print("Invalid selection.")
+        return
 
-        print()
-        print(final_report)
-    finally:
-        total_time = perf_counter() - command_start
-        record_command_runtime(total_time)
-
-
-def handle_research_apply(client: Any) -> None:
-    """Apply saved research notes to a scene or chapter for realism conflict auditing."""
-    command_start = perf_counter()
     try:
-        if not RESEARCH_DIR.exists() or not RESEARCH_DIR.is_dir():
-            print("No research topics found.")
-            return
+        report = request_chat_completion(
+            client=client,
+            messages=build_research_apply_messages(
+                research_notes=research_notes,
+                scene_text=scene_text,
+            ),
+            temperature=RESEARCH_SCENE_TEMPERATURE,
+            task_type="research",
+        )
+    except Exception as exc:  # Keep terminal app stable for the user.
+        print(f"Research realism audit failed: {exc}")
+        return
 
-        topic_files = sorted(path for path in RESEARCH_DIR.iterdir() if path.is_file())
-        if not topic_files:
-            print("No research topics found.")
-            return
-
-        print("Available research topics:")
-        for index, topic_path in enumerate(topic_files, start=1):
-            print(f"{index}. {topic_path.name}")
-
-        print("Select topic number.")
-        try:
-            topic_selection = input("> ").strip()
-        except EOFError:
-            print()
-            return
-
-        if not topic_selection.isdigit():
-            print("Invalid selection.")
-            return
-
-        topic_index = int(topic_selection)
-        if topic_index < 1 or topic_index > len(topic_files):
-            print("Invalid selection.")
-            return
-
-        selected_topic_path = topic_files[topic_index - 1]
-        research_notes = read_text_file(selected_topic_path)
-
-        print("Choose input type:")
-        print("1 = Paste scene")
-        print("2 = Choose chapter file")
-        try:
-            input_type = input("> ").strip()
-        except EOFError:
-            print()
-            return
-
-        scene_text = ""
-        if input_type == "1":
-            print("Paste scene text. Type END on new line when finished.")
-            scene_text = collect_multiline_input(end_marker="END")
-            if not scene_text:
-                print("No scene provided.")
-                return
-        elif input_type == "2":
-            chapter_number = prompt_for_chapter_number("Ask chapter number.")
-            if chapter_number is None:
-                return
-            chapter_path = CHAPTERS_DIR / f"chapter_{chapter_number}.txt"
-            if not chapter_path.exists() or not chapter_path.is_file():
-                print("Chapter file not found.")
-                return
-            scene_text = clean_terminal_text(chapter_path.read_text(encoding="utf-8"))
-            if not scene_text:
-                print("Chapter file is empty.")
-                return
-        else:
-            print("Invalid selection.")
-            return
-
-        try:
-            report = request_chat_completion(
-                client=client,
-                messages=build_research_apply_messages(
-                    research_notes=research_notes,
-                    scene_text=scene_text,
-                ),
-                temperature=RESEARCH_SCENE_TEMPERATURE,
-                task_type="research",
-            )
-        except Exception as exc:  # Keep terminal app stable for the user.
-            print(f"Research realism audit failed: {exc}")
-            return
-
-        print()
-        print(report)
-    finally:
-        total_time = perf_counter() - command_start
-        record_command_runtime(total_time)
+    print()
+    print(report)
 
 
 def handle_research_integrity(client: Any) -> None:
     """Audit all saved research topics for scientific consistency issues only."""
-    command_start = perf_counter()
+    RESEARCH_DIR.mkdir(parents=True, exist_ok=True)
+    RESEARCH_INTEGRITY_REPORTS_DIR.mkdir(parents=True, exist_ok=True)
+
+    topic_files = sorted(
+        path
+        for path in RESEARCH_DIR.iterdir()
+        if path.is_file() and path.suffix.lower() == ".txt"
+    )
+    if not topic_files:
+        print("No research topics found.")
+        return
+
+    corpus_parts: list[str] = []
+    for topic_path in topic_files:
+        topic_text = clean_terminal_text(topic_path.read_text(encoding="utf-8"))
+        if not topic_text:
+            continue
+        corpus_parts.append(f"FILE: {topic_path.name}\n{topic_text}")
+
+    if not corpus_parts:
+        print("No research topics found.")
+        return
+
+    research_corpus = ("\n\n" + ("-" * 60) + "\n\n").join(corpus_parts)
+
     try:
-        RESEARCH_DIR.mkdir(parents=True, exist_ok=True)
-        RESEARCH_INTEGRITY_REPORTS_DIR.mkdir(parents=True, exist_ok=True)
-
-        topic_files = sorted(
-            path
-            for path in RESEARCH_DIR.iterdir()
-            if path.is_file() and path.suffix.lower() == ".txt"
+        report = request_chat_completion(
+            client=client,
+            messages=build_research_integrity_messages(research_corpus),
+            temperature=RESEARCH_TEMPERATURE,
+            task_type="research",
         )
-        if not topic_files:
-            print("No research topics found.")
-            return
+    except Exception as exc:  # Keep terminal app stable for the user.
+        print(f"Research integrity audit failed: {exc}")
+        return
 
-        corpus_parts: list[str] = []
-        for topic_path in topic_files:
-            topic_text = clean_terminal_text(topic_path.read_text(encoding="utf-8"))
-            if not topic_text:
-                continue
-            corpus_parts.append(f"FILE: {topic_path.name}\n{topic_text}")
+    print()
+    print(report)
 
-        if not corpus_parts:
-            print("No research topics found.")
-            return
+    if not prompt_for_confirmation("Save integrity report? (y/n)"):
+        return
 
-        research_corpus = ("\n\n" + ("-" * 60) + "\n\n").join(corpus_parts)
+    timestamp = datetime.utcnow().strftime("%Y%m%d_%H%M")
+    output_path = RESEARCH_INTEGRITY_REPORTS_DIR / f"integrity_{timestamp}.txt"
+    suffix = 1
+    while output_path.exists():
+        output_path = RESEARCH_INTEGRITY_REPORTS_DIR / f"integrity_{timestamp}_{suffix}.txt"
+        suffix += 1
 
-        try:
-            report = request_chat_completion(
-                client=client,
-                messages=build_research_integrity_messages(research_corpus),
-                temperature=RESEARCH_TEMPERATURE,
-                task_type="research",
-            )
-        except Exception as exc:  # Keep terminal app stable for the user.
-            print(f"Research integrity audit failed: {exc}")
-            return
+    try:
+        atomic_write(output_path, report)
+    except OSError as exc:
+        print(f"Could not save integrity report: {exc}")
+        return
 
-        print()
-        print(report)
-
-        if not prompt_for_confirmation("Save integrity report? (y/n)"):
-            return
-
-        timestamp = datetime.utcnow().strftime("%Y%m%d_%H%M")
-        output_path = RESEARCH_INTEGRITY_REPORTS_DIR / f"integrity_{timestamp}.txt"
-        suffix = 1
-        while output_path.exists():
-            output_path = RESEARCH_INTEGRITY_REPORTS_DIR / f"integrity_{timestamp}_{suffix}.txt"
-            suffix += 1
-
-        try:
-            atomic_write(output_path, report)
-        except OSError as exc:
-            print(f"Could not save integrity report: {exc}")
-            return
-
-        print("Research integrity report saved.")
-    finally:
-        total_time = perf_counter() - command_start
-        record_command_runtime(total_time)
+    print("Research integrity report saved.")
 
 
 def handle_world_add() -> None:
@@ -7251,6 +7219,8 @@ def handle_system(command_text: str = "") -> None:
 
 def main() -> None:
     """Run the terminal assistant."""
+    assert_single_configuration_blocks()
+    assert_router_configuration_integrity()
     ensure_project_files()
 
     try:
@@ -7332,7 +7302,12 @@ def main() -> None:
         routed = False
         for command_name in sorted(command_handlers.keys(), key=len, reverse=True):
             if command_matches_input(command_name, user_input):
-                command_handlers[command_name](user_input)
+                reset_pipeline_stats_for_command()
+                command_start = perf_counter()
+                try:
+                    command_handlers[command_name](user_input)
+                finally:
+                    record_command_runtime(perf_counter() - command_start)
                 routed = True
                 break
 
@@ -7343,6 +7318,8 @@ def main() -> None:
         conversation_history = conversation_history[-MAX_CONVERSATION_TURNS * 2:]
         messages = build_main_messages(memory_block, conversation_history, user_input)
 
+        reset_pipeline_stats_for_command()
+        command_start = perf_counter()
         try:
             reply = request_chat_completion(
                 client=client,
@@ -7351,8 +7328,10 @@ def main() -> None:
                 task_type="general",
             )
         except Exception as exc:  # Keep terminal app stable for the user.
+            record_command_runtime(perf_counter() - command_start)
             print(f"Assistant request failed: {exc}")
             continue
+        record_command_runtime(perf_counter() - command_start)
 
         print(f"\nAssistant: {reply}")
 
