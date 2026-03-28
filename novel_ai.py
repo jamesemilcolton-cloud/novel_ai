@@ -631,6 +631,14 @@ PROOFREAD_SYSTEM_PROMPT = """You are a professional novel editor and formatter.
 
 Your job is to REWRITE the provided text into a clean, publication-ready novel format.
 
+You must perform THREE steps in order:
+
+1) Rewrite and correct the text
+2) Summarise what you changed
+3) Provide writing improvement suggestions
+
+All three steps are mandatory.
+
 You MUST output a fully corrected version of the text.
 
 Do NOT provide suggestions first.
@@ -682,10 +690,17 @@ CORRECTED TEXT:
 
 ---
 
-SUGGESTIONS (optional improvements only):
+CHANGES MADE:
 
-- vocabulary improvements
+<clear summary of corrections>
+
+---
+
+WRITING IMPROVEMENTS:
+
 - stronger verbs
+- adjective upgrades
+- improved vocabulary
 - phrasing improvements
 
 -----------------------------------------------------
@@ -694,9 +709,14 @@ STRICT RULES:
 
 - DO NOT leave the text unchanged
 - DO NOT output suggestions before corrected text
+- MUST include CHANGES MADE section
+- MUST include WRITING IMPROVEMENTS section
+- DO NOT treat improvements as optional
+- DO NOT skip explanation of what was changed
 - DO NOT explain grammar
 - DO NOT analyse writing quality
 - DO NOT add new story elements
+- Provide replacement upgrades where possible (example: "walked quickly" → "hurried")
 
 If no improvements are needed, still output the corrected text.
 """
@@ -2689,12 +2709,14 @@ def extract_corrected_text(response: str) -> str:
     return response.strip()
 
 
-def extract_proofread_suggestions(response: str) -> str:
-    """Extract optional suggestions section from proofreading response."""
-    if "---" not in response:
+def extract_proofread_section(response: str, header: str) -> str:
+    """Extract one labelled proofread section from the model response."""
+    escaped_header = re.escape(header)
+    pattern = rf"{escaped_header}:\s*(.*?)(?:\n\s*---\s*\n|$)"
+    match = re.search(pattern, response, flags=re.DOTALL)
+    if not match:
         return ""
-    suggestions = response.split("---", 1)[1].strip()
-    return suggestions
+    return match.group(1).strip()
 
 
 
@@ -3727,7 +3749,8 @@ def handle_proofread(client: Any, command_text: str = "") -> None:
         return
 
     corrected_text = extract_corrected_text(result)
-    suggestions = extract_proofread_suggestions(result)
+    changes_made = extract_proofread_section(result, "CHANGES MADE")
+    writing_improvements = extract_proofread_section(result, "WRITING IMPROVEMENTS")
     skip_clipboard_copy = " nocopy" in f" {command_text.strip().lower()} "
 
     print()
@@ -3741,9 +3764,16 @@ def handle_proofread(client: Any, command_text: str = "") -> None:
         print()
         print("📋 Clean text copied to clipboard. Paste into your editor.")
 
-    if suggestions:
-        print()
-        print(suggestions)
+    print()
+    print("CHANGES MADE:")
+    print(changes_made or "No major correction categories were identified.")
+
+    print()
+    print("WRITING IMPROVEMENTS:")
+    print(
+        writing_improvements
+        or "- No additional upgrades were found beyond the corrected rewrite."
+    )
 
 
 
@@ -6231,7 +6261,7 @@ Use to fix:
 - strict UK spelling
 - novel paragraph/dialogue formatting
 
-Returns rewritten clean text first, then optional suggestions.
+Returns rewritten clean text, then a required CHANGES MADE summary, then required WRITING IMPROVEMENTS.
 Automatically copies clean text to clipboard (use /proofread nocopy to skip).
 
 ---
