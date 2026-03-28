@@ -5,6 +5,7 @@ import re
 import inspect
 import math
 import shutil
+import subprocess
 from collections import Counter, OrderedDict
 from copy import deepcopy
 from datetime import datetime, timedelta
@@ -626,33 +627,78 @@ BOOK INTEGRITY REPORT
 
 <sections listed above>"""
 
-PROOFREAD_SYSTEM_PROMPT = """You are a professional proofreader.
+PROOFREAD_SYSTEM_PROMPT = """You are a professional novel editor and formatter.
 
-You must:
-- Correct grammar
-- Correct punctuation
-- Correct spelling
-- Improve vocabulary where appropriate
-- Improve sentence clarity
+Your job is to REWRITE the provided text into a clean, publication-ready novel format.
 
-You must NOT:
-- Change story meaning
-- Add new content
-- Remove content
-- Summarise
-- Change plot or character actions
-- Reorder paragraphs
-- Give writing advice
-- Mention style or pacing
+You MUST output a fully corrected version of the text.
 
-Return output in this exact structure:
+Do NOT provide suggestions first.
+Do NOT analyse before rewriting.
 
-PROOFREAD RESULT
+-----------------------------------------------------
 
-<corrected text>
+APPLY THESE RULES:
 
-VOCABULARY SUGGESTIONS
-- original → improved
+LANGUAGE:
+- Correct all grammar, spelling, and punctuation
+- Use STRICT British English spelling (UK English)
+- Improve sentence clarity where needed
+
+PARAGRAPH STRUCTURE:
+- Break large text blocks into proper paragraphs
+- Start a new paragraph when:
+  - A new character speaks
+  - Focus or action changes
+  - A new narrative beat occurs
+
+DIALOGUE:
+- Use double quotation marks
+- Each new speaker must start a new paragraph
+- Dialogue tags remain in the same paragraph
+
+SCENE STRUCTURE:
+- Insert scene breaks using:
+  ***
+- ONLY when there is a clear time jump, location change, or perspective shift
+- Do NOT overuse scene breaks
+
+INDENTATION:
+- Format as clean novel paragraphs
+- First paragraph after a break or scene = no indent
+
+STYLE:
+- Preserve original tone and intent
+- Do NOT add new story content
+- Only rewrite for correctness, clarity, and formatting
+
+-----------------------------------------------------
+
+OUTPUT FORMAT:
+
+CORRECTED TEXT:
+
+<fully rewritten novel-formatted text>
+
+---
+
+SUGGESTIONS (optional improvements only):
+
+- vocabulary improvements
+- stronger verbs
+- phrasing improvements
+
+-----------------------------------------------------
+
+STRICT RULES:
+
+- DO NOT leave the text unchanged
+- DO NOT output suggestions before corrected text
+- DO NOT explain grammar
+- DO NOT analyse writing quality
+- DO NOT add new story elements
+
+If no improvements are needed, still output the corrected text.
 """
 
 
@@ -2622,6 +2668,35 @@ def build_proofread_messages(text_to_proofread: str) -> list[dict[str, str]]:
     ]
 
 
+def copy_to_clipboard(text: str) -> bool:
+    """Copy text to clipboard via wl-copy and keep terminal flow stable on errors."""
+    try:
+        subprocess.run(
+            ["wl-copy"],
+            input=text.encode(),
+            check=True,
+        )
+    except Exception as exc:  # Keep terminal app stable for the user.
+        print("Clipboard copy failed:", exc)
+        return False
+    return True
+
+
+def extract_corrected_text(response: str) -> str:
+    """Extract corrected text block from proofreading response."""
+    if "CORRECTED TEXT:" in response:
+        return response.split("CORRECTED TEXT:")[1].split("---")[0].strip()
+    return response.strip()
+
+
+def extract_proofread_suggestions(response: str) -> str:
+    """Extract optional suggestions section from proofreading response."""
+    if "---" not in response:
+        return ""
+    suggestions = response.split("---", 1)[1].strip()
+    return suggestions
+
+
 
 
 def build_idea_resurface_messages(
@@ -3631,8 +3706,8 @@ def handle_rebuild_summaries(client: Any) -> None:
     print("Invalid selection. Enter 1 or 2.")
 
 
-def handle_proofread(client: Any) -> None:
-    """Proofread pasted text in a fully isolated request."""
+def handle_proofread(client: Any, command_text: str = "") -> None:
+    """Rewrite and format pasted text, then optionally copy clean output to clipboard."""
     print("Paste text to proofread. Type END on a new line when finished.")
     text_to_proofread = collect_multiline_input(end_marker="END")
     text_to_proofread = clean_terminal_text(text_to_proofread)
@@ -3651,8 +3726,24 @@ def handle_proofread(client: Any) -> None:
         print("Proofread failed.")
         return
 
+    corrected_text = extract_corrected_text(result)
+    suggestions = extract_proofread_suggestions(result)
+    skip_clipboard_copy = " nocopy" in f" {command_text.strip().lower()} "
+
     print()
-    print(result)
+    print(corrected_text)
+
+    if skip_clipboard_copy:
+        print()
+        print("📋 Clipboard copy skipped (/proofread nocopy).")
+    else:
+        copy_to_clipboard(corrected_text)
+        print()
+        print("📋 Clean text copied to clipboard. Paste into your editor.")
+
+    if suggestions:
+        print()
+        print(suggestions)
 
 
 
@@ -5467,14 +5558,14 @@ Canon memory impact: Can append, resolve, or update canon facts and state-tracki
 Manuscript impact: May save chapter text updates when user chooses to persist generated/edited chapter content.
 Safety level: Modifies data.
 When to use: After drafting a substantial scene to keep memory and continuity synchronized.""",
-    "/proofread": """Purpose: Proofread pasted text for grammar, punctuation, and clarity without changing core meaning.
+    "/proofread": """Purpose: Rewrite pasted text into clean, publication-ready novel formatting with UK English corrections.
 Files read: User-pasted text only.
-Files written: None by default.
+Files written: None.
 AI usage: Yes.
 Canon memory impact: None.
-Manuscript impact: None unless user manually applies suggestions elsewhere.
+Manuscript impact: None unless user manually pastes rewritten output into project files.
 Safety level: Safe.
-When to use: Immediately after writing a scene/chapter draft before continuity processing.""",
+When to use: Immediately after writing a scene/chapter draft before continuity processing. Supports /proofread nocopy to skip clipboard copy.""",
     "/rebuild-memory": """Purpose: Reconstruct canon memory from existing chapter files after major edits.
 Files read: Chapter files, existing canon memory, and related project memory artifacts.
 Files written: Canon memory, story state memory, timeline threads, scene summaries, and rebuild logs.
@@ -6003,7 +6094,9 @@ chapter_<number>.txt
 PHASE 2 — SESSION CLEANUP
 
 /proofread
-→ grammar, punctuation, vocabulary clarity
+→ full rewrite for grammar, punctuation, UK spelling
+→ novel paragraph/dialogue formatting
+→ auto-copy clean text to clipboard (use /proofread nocopy to skip)
 
 /scene-summary
 → extract canon facts
@@ -6135,9 +6228,11 @@ Use to fix:
 
 - grammar
 - punctuation
-- vocabulary clarity
+- strict UK spelling
+- novel paragraph/dialogue formatting
 
-Does NOT change story meaning.
+Returns rewritten clean text first, then optional suggestions.
+Automatically copies clean text to clipboard (use /proofread nocopy to skip).
 
 ---
 
@@ -6647,7 +6742,7 @@ def main() -> None:
         "/book-integrity": lambda command_text="": handle_book_integrity(client),
         "/world-consistency": lambda command_text="": handle_world_consistency(client),
         "/character-consistency": lambda command_text="": handle_character_consistency(client),
-        "/proofread": lambda command_text="": handle_proofread(client),
+        "/proofread": lambda command_text="": handle_proofread(client, command_text),
         "/research-topic": lambda command_text="": handle_research_topic(client),
         "/research-scene": lambda command_text="": handle_research_scene(client),
         "/research-apply": lambda command_text="": handle_research_apply(client),
