@@ -4301,8 +4301,20 @@ def handle_restore_draft() -> None:
     handle_draft_load()
 
 
-def handle_ideas() -> None:
-    """Capture a freeform writing idea without affecting assistant state."""
+def handle_ideas(command_text: str = "") -> None:
+    """Capture a freeform idea or list saved ideas without AI involvement."""
+    if "--list" in command_text:
+        if not IDEAS_PATH.exists():
+            print("No ideas file found.")
+            return
+        ideas_text = IDEAS_PATH.read_text(encoding="utf-8").rstrip()
+        if not ideas_text:
+            print("No ideas saved yet.")
+            return
+        print("IDEAS LIST:\n")
+        print(ideas_text)
+        return
+
     print("Paste idea. Type END on a new line when finished.")
     idea_text = collect_multiline_input(end_marker="END")
     idea_text = clean_terminal_text(idea_text)
@@ -5644,6 +5656,14 @@ Canon memory impact: None.
 Manuscript impact: None.
 Safety level: Modifies data.
 When to use: Any time you want to capture inspiration for later.""",
+    "/ideas --list": """Purpose: View all saved ideas exactly as currently stored.
+Files read: Ideas memory file.
+Files written: None.
+AI usage: No.
+Canon memory impact: None.
+Manuscript impact: None.
+Safety level: Safe.
+When to use: Any time you want to review previously saved ideas.""",
     "/idea-resurface": """Purpose: Retrieve and rank previously saved ideas relevant to current context.
 Files read: Ideas memory file and optional user prompt text.
 Files written: None.
@@ -6488,6 +6508,16 @@ Use anytime inspiration occurs.
 
 ---
 
+WHEN VIEWING SAVED IDEAS
+
+/ideas --list
+
+Use to:
+
+- read all saved ideas as-is.
+
+---
+
 WHEN PERFORMING SCIENTIFIC REALISM RESEARCH
 
 /research-topic
@@ -6787,7 +6817,8 @@ def main() -> None:
         "/save-draft": lambda command_text="": handle_draft_save(),
         "/drafts": lambda command_text="": handle_draft_list(),
         "/restore-draft": lambda command_text="": handle_draft_load(),
-        "/ideas": lambda command_text="": handle_ideas(),
+        "/ideas --list": handle_ideas,
+        "/ideas": handle_ideas,
         "/world-add": lambda command_text="": handle_world_add(),
         "/timeline-view": lambda command_text="": handle_timeline_view(),
         "/story-state": lambda command_text="": handle_story_state(),
