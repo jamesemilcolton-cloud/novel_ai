@@ -6,6 +6,9 @@ import inspect
 import math
 import shutil
 import subprocess
+import sys
+import threading
+import time
 from collections import Counter, OrderedDict
 from copy import deepcopy
 from datetime import datetime, timedelta
@@ -73,6 +76,9 @@ MAX_SCENE_SUMMARIES = 5
 MAX_CONVERSATION_TURNS = 6
 MAX_CANON_CHARACTERS = 12000
 DEFAULT_ANALYSIS_CHUNK_WORDS = 6000
+
+SPINNER_FRAMES = ["|", "/", "-", "\\"]
+SPINNER_INTERVAL_SECONDS = 0.1
 
 MAIN_SYSTEM_PROMPT = """You are a thoughtful AI novel-writing assistant.
 Help the user think through story ideas, scenes, structure, tone, character, and prose.
@@ -2519,6 +2525,76 @@ def apply_story_state_updates(
 
 
 # ============================================================
+# Global loading spinner
+# ============================================================
+
+_loading_lock = threading.Lock()
+_loading_thread: threading.Thread | None = None
+_loading_active = False
+_loading_message = "Processing..."
+_loading_depth = 0
+
+
+def _spinner_loop() -> None:
+    """Render a one-line spinner while loading is active."""
+    frame_index = 0
+    while True:
+        with _loading_lock:
+            if not _loading_active:
+                break
+            message = _loading_message
+        frame = SPINNER_FRAMES[frame_index % len(SPINNER_FRAMES)]
+        sys.stdout.write(f"\r{message} {frame}")
+        sys.stdout.flush()
+        frame_index += 1
+        time.sleep(SPINNER_INTERVAL_SECONDS)
+
+
+def start_loading(message: str = "Processing...") -> None:
+    """Start the global loading spinner (supports nested calls)."""
+    global _loading_active, _loading_thread, _loading_message, _loading_depth
+    with _loading_lock:
+        _loading_depth += 1
+        _loading_message = message
+        if _loading_active:
+            return
+        _loading_active = True
+        _loading_thread = threading.Thread(target=_spinner_loop, daemon=True)
+        _loading_thread.start()
+
+
+def stop_loading() -> None:
+    """Stop the global loading spinner safely and clear its line."""
+    global _loading_active, _loading_thread, _loading_depth
+    spinner_thread: threading.Thread | None = None
+    with _loading_lock:
+        if _loading_depth > 0:
+            _loading_depth -= 1
+        if _loading_depth > 0:
+            return
+        _loading_active = False
+        spinner_thread = _loading_thread
+        _loading_thread = None
+
+    if spinner_thread is not None:
+        spinner_thread.join(timeout=1.0)
+
+    clear_width = shutil.get_terminal_size(fallback=(80, 20)).columns
+    sys.stdout.write("\r" + (" " * max(0, clear_width - 1)) + "\r")
+    sys.stdout.write("\n")
+    sys.stdout.flush()
+
+
+def run_with_loading(message: str, function: Callable[[], Any]) -> Any:
+    """Run any callable with spinner lifecycle handled automatically."""
+    start_loading(message)
+    try:
+        return function()
+    finally:
+        stop_loading()
+
+
+# ============================================================
 # OpenAI helpers
 # ============================================================
 
@@ -2540,12 +2616,16 @@ def request_chat_completion(
     client: Any,
     messages: list[dict[str, str]],
     temperature: float,
+    loading_message: str = "Processing...",
 ) -> str:
     """Send a chat request and return plain text output."""
-    response = client.responses.create(
-        model=MODEL_NAME,
-        input=messages,
-        temperature=temperature,
+    response = run_with_loading(
+        loading_message,
+        lambda: client.responses.create(
+            model=MODEL_NAME,
+            input=messages,
+            temperature=temperature,
+        ),
     )
     return response.output_text.strip()
 
@@ -6779,6 +6859,45 @@ def handle_system(command_text: str = "") -> None:
     print("Unsupported system option. Use /system --tree, /system --map, or /system --health")
 
 
+LONG_RUNNING_COMMAND_PREFIXES: tuple[str, ...] = (
+    "/scene-summary",
+    "/recap",
+    "/chapter-summary",
+    "/rebuild-summaries",
+    "/rebuild-memory",
+    "/continuity-check",
+    "/book-integrity",
+    "/world-consistency",
+    "/character-consistency",
+    "/proofread",
+    "/research-topic",
+    "/research-scene",
+    "/research-apply",
+    "/research-integrity",
+    "/research",
+    "/idea-resurface",
+    "/draft-pass",
+    "/build-book",
+)
+
+
+def command_requires_loading(user_input: str) -> bool:
+    """Return True when command should run under the global loading wrapper."""
+    normalized = user_input.strip().lower()
+    return any(normalized.startswith(prefix) for prefix in LONG_RUNNING_COMMAND_PREFIXES)
+
+
+def execute_command_with_optional_loading(
+    command_name: str,
+    command_handler: Callable[[str], None],
+    user_input: str,
+) -> None:
+    """Centralized command execution layer with reusable loading support."""
+    if command_requires_loading(user_input):
+        run_with_loading(f"Running {command_name}...", lambda: command_handler(user_input))
+        return
+    command_handler(user_input)
+
 
 def main() -> None:
     """Run the terminal assistant."""
@@ -6862,7 +6981,11 @@ def main() -> None:
         routed = False
         for command_name in sorted(command_handlers.keys(), key=len, reverse=True):
             if command_matches_input(command_name, user_input):
-                command_handlers[command_name](user_input)
+                execute_command_with_optional_loading(
+                    command_name,
+                    command_handlers[command_name],
+                    user_input,
+                )
                 routed = True
                 break
 
