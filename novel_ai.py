@@ -38,6 +38,7 @@ DRAFTS_DIR = NOVEL_PROJECT_DIR / "drafts"
 PROJECT_BACKUPS_DIR = NOVEL_PROJECT_DIR / "backups"
 CANON_MEMORY_BACKUPS_DIR = PROJECT_MEMORY_DIR / "backups"
 RESEARCH_DIR = NOVEL_PROJECT_DIR / "research"
+INSPIRATIONS_DIR = NOVEL_PROJECT_DIR / "inspirations"
 RESEARCH_INTEGRITY_REPORTS_DIR = RESEARCH_DIR / "integrity_reports"
 WORLD_PLAUSIBILITY_REPORTS_DIR = PROJECT_ANALYSIS_DIR / "world_plausibility_reports"
 CANON_MEMORY_PATH = PROJECT_MEMORY_DIR / "canon_memory.txt"
@@ -134,6 +135,103 @@ Active Narrative Pressures
 
 Momentum Direction
 - ...
+"""
+
+INSPIRATION_ANALYSIS_SYSTEM_PROMPT = """You are a professional writing technique analyst.
+
+You are given structured inspiration data grouped by writing technique.
+
+Your job is to:
+
+1) Extract clear technique patterns from EACH category
+2) Compare those patterns to the user's writing
+3) Explain how to apply those techniques
+
+-----------------------------------------------------
+
+RULES:
+
+- DO NOT rewrite the user's text
+- DO NOT suggest plot ideas
+- DO NOT create new story content
+- DO NOT copy inspiration text directly
+
+-----------------------------------------------------
+
+FOCUS AREAS:
+
+PROSE:
+- sentence rhythm
+- sentence length variation
+- tone
+
+DIALOGUE:
+- subtext
+- conflict through speech
+- indirect communication
+
+DESCRIPTION:
+- sensory detail
+- environmental influence
+- mood creation
+
+PACING:
+- sentence speed
+- paragraph density
+- action vs reflection balance
+
+TENSION:
+- stakes clarity
+- pressure building
+- sentence tightening
+
+DEVICES:
+- structural techniques
+- narrative framing
+- stylistic tools
+
+-----------------------------------------------------
+
+OUTPUT FORMAT:
+
+INSPIRATION ANALYSIS
+
+PROSE:
+- pattern
+- pattern
+
+DIALOGUE:
+- pattern
+
+DESCRIPTION:
+- pattern
+
+PACING:
+- pattern
+
+TENSION:
+- pattern
+
+DEVICES:
+- pattern
+
+---
+
+YOUR TEXT ANALYSIS:
+- issue
+- issue
+
+---
+
+HOW TO APPLY:
+- actionable technique
+- actionable technique
+
+---
+
+EXAMPLES:
+- short quote from user text
+- explain technique (DO NOT rewrite)
 """
 
 RESEARCH_SCENE_SYSTEM_PROMPT = """You are a hard-science realism consultant.
@@ -4409,6 +4507,82 @@ def handle_ideas(command_text: str = "") -> None:
         print("Idea could not be saved.")
 
 
+def load_structured_inspiration_data() -> dict[str, str]:
+    """Load inspiration files by category across all inspiration-book folders."""
+    category_filenames = OrderedDict(
+        [
+            ("prose", "prose.txt"),
+            ("dialogue", "dialogue.txt"),
+            ("description", "description.txt"),
+            ("pacing", "pacing.txt"),
+            ("tension", "tension.txt"),
+            ("devices", "devices.txt"),
+        ]
+    )
+    combined = {category: "" for category in category_filenames}
+
+    if not INSPIRATIONS_DIR.exists() or not INSPIRATIONS_DIR.is_dir():
+        return combined
+
+    for book_dir in sorted(path for path in INSPIRATIONS_DIR.iterdir() if path.is_dir()):
+        for category, filename in category_filenames.items():
+            file_path = book_dir / filename
+            if not file_path.exists() or not file_path.is_file():
+                continue
+            try:
+                content = clean_terminal_text(file_path.read_text(encoding="utf-8")).strip()
+            except OSError:
+                continue
+            if not content:
+                continue
+            if combined[category]:
+                combined[category] += "\n\n"
+            combined[category] += content
+
+    return combined
+
+
+def handle_inspiration(client: Any) -> None:
+    """Compare user scene techniques against structured inspirations grouped by category."""
+    print("Paste your scene. Type END on a new line when finished.")
+    user_text = collect_multiline_input(end_marker="END")
+    if not user_text:
+        print("No scene provided.")
+        return
+
+    combined = load_structured_inspiration_data()
+    if all(not section.strip() for section in combined.values()):
+        print("No inspiration data found.")
+        return
+
+    user_payload = (
+        "Analyze the user's writing against the structured inspiration sections.\n\n"
+        f"USER TEXT:\n{user_text}\n\n"
+        f"PROSE TECHNIQUES:\n{combined['prose'] or '(none)'}\n\n"
+        f"DIALOGUE TECHNIQUES:\n{combined['dialogue'] or '(none)'}\n\n"
+        f"DESCRIPTION TECHNIQUES:\n{combined['description'] or '(none)'}\n\n"
+        f"PACING TECHNIQUES:\n{combined['pacing'] or '(none)'}\n\n"
+        f"TENSION TECHNIQUES:\n{combined['tension'] or '(none)'}\n\n"
+        f"NARRATIVE DEVICES:\n{combined['devices'] or '(none)'}"
+    )
+
+    try:
+        analysis = request_chat_completion(
+            client=client,
+            messages=[
+                {"role": "system", "content": INSPIRATION_ANALYSIS_SYSTEM_PROMPT},
+                {"role": "user", "content": user_payload},
+            ],
+            temperature=SCENE_TEMPERATURE,
+        )
+    except Exception as exc:  # Keep terminal app stable for the user.
+        print(f"Inspiration analysis failed: {exc}")
+        return
+
+    print()
+    print(analysis.strip())
+
+
 def handle_novel_stats() -> None:
     """Print chapter and wordcount telemetry for the current novel project."""
     ensure_project_files()
@@ -5752,6 +5926,14 @@ Canon memory impact: None.
 Manuscript impact: None.
 Safety level: Safe.
 When to use: When story progress stalls and prior idea inventory may help.""",
+    "/inspiration": """Purpose: Analyse writing techniques in a pasted scene against structured inspiration categories.
+Files read: Inspiration category files under ~/writing/novel_project/inspirations/<book>/ and user-pasted scene text.
+Files written: None.
+AI usage: Yes.
+Canon memory impact: None.
+Manuscript impact: None.
+Safety level: Safe.
+When to use: When you want craft-level technique feedback (prose/dialogue/description/pacing/tension/devices) without plot or rewrite suggestions.""",
     "/world-add": """Purpose: Append a confirmed world rule/fact to world memory storage.
 Files read: Existing world memory file.
 Files written: World memory file.
@@ -6117,6 +6299,7 @@ HELP_SECTION_TAXONOMY: OrderedDict[str, list[str]] = OrderedDict(
                 "/proofread",
                 "/ideas",
                 "/idea-resurface",
+                "/inspiration",
             ],
         ),
         (
@@ -6878,6 +7061,7 @@ LONG_RUNNING_COMMAND_PREFIXES: tuple[str, ...] = (
     "/idea-resurface",
     "/draft-pass",
     "/build-book",
+    "/inspiration",
 )
 
 
@@ -6928,6 +7112,7 @@ def main() -> None:
         "/research-integrity": lambda command_text="": handle_research_integrity(client),
         "/research": lambda command_text="": handle_research(client, command_text),
         "/idea-resurface": lambda command_text="": handle_idea_resurface(client),
+        "/inspiration": lambda command_text="": handle_inspiration(client),
         "/draft-pass": lambda command_text="": handle_draft_pass(client, command_text),
         "/build-book": lambda command_text="": handle_build_book(),
         "/draft-save": lambda command_text="": handle_draft_save(),
