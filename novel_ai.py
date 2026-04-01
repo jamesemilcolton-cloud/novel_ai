@@ -6028,6 +6028,14 @@ Canon memory impact: None.
 Manuscript impact: None unless user manually pastes rewritten output into project files.
 Safety level: Safe.
 When to use: Immediately after writing a scene/chapter draft before continuity processing. Supports /proofread nocopy to skip clipboard copy.""",
+    "/proofread nocopy": """Purpose: Rewrite pasted text into clean, publication-ready novel formatting without clipboard auto-copy.
+Files read: User-pasted text only.
+Files written: None.
+AI usage: Yes.
+Canon memory impact: None.
+Manuscript impact: None unless user manually pastes rewritten output into project files.
+Safety level: Safe.
+When to use: Same as /proofread when clipboard copy should be skipped.""",
     "/rebuild-memory": """Purpose: Reconstruct canon memory from existing chapter files after major edits.
 Files read: Chapter files, existing canon memory, and related project memory artifacts.
 Files written: Canon memory, story state memory, timeline threads, scene summaries, and rebuild logs.
@@ -6036,6 +6044,22 @@ Canon memory impact: Replaces and rebuilds canonical continuity records.
 Manuscript impact: Does not edit manuscript prose directly.
 Safety level: Modifies data.
 When to use: After large rewrites, chapter reordering, or memory drift concerns.""",
+    "/rebuild-memory full": """Purpose: Force a full-novel canon memory rebuild from existing chapter files.
+Files read: All chapter files, existing canon memory, and related project memory artifacts.
+Files written: Canon memory, story state memory, timeline threads, scene summaries, and rebuild logs.
+AI usage: Yes.
+Canon memory impact: Replaces and rebuilds canonical continuity records across the full novel.
+Manuscript impact: Does not edit manuscript prose directly.
+Safety level: Modifies data.
+When to use: After large rewrites spanning multiple chapters or major structural reordering.""",
+    "/rebuild-memory single": """Purpose: Rebuild canon memory with single-chapter targeting.
+Files read: Selected chapter file, existing canon memory, and related project memory artifacts.
+Files written: Canon memory, story state memory, timeline threads, scene summaries, and rebuild logs.
+AI usage: Yes.
+Canon memory impact: Updates continuity records with targeted single-chapter rebuild intent.
+Manuscript impact: Does not edit manuscript prose directly.
+Safety level: Modifies data.
+When to use: After heavy edits to one chapter where full novel rebuild is unnecessary.""",
     "/continuity-check": """Purpose: Compare selected chapter content against memory/context to detect factual continuity issues.
 Files read: Canon memory, selected chapter text, and nearby chapter context.
 Files written: Continuity report file.
@@ -6260,6 +6284,14 @@ Canon memory impact: None.
 Manuscript impact: None.
 Safety level: Safe.
 When to use: Before long sessions or when system/performance drift is suspected.""",
+    "/system": """Purpose: Base system namespace command for system diagnostics/options.
+Files read: Depends on selected option.
+Files written: None.
+AI usage: No.
+Canon memory impact: None.
+Manuscript impact: None.
+Safety level: Safe.
+When to use: Use with /system --tree, /system --map, or /system --health.""",
     "/help --describe": """Purpose: Interactive static command manual lookup by numbered command selection.
 Files read: Built-in ALL_COMMANDS and COMMAND_HELP constants only.
 Files written: None.
@@ -6431,8 +6463,6 @@ HELP_SECTION_TAXONOMY: OrderedDict[str, list[str]] = OrderedDict(
                 "/system --health",
                 "/novel-stats",
                 "/story-state",
-                "/rebuild-memory",
-                "/rebuild-summaries",
             ],
         ),
         (
@@ -6463,7 +6493,9 @@ HELP_SECTION_TAXONOMY: OrderedDict[str, list[str]] = OrderedDict(
                 "/scene-summary",
                 "/recap",
                 "/proofread",
+                "/proofread nocopy",
                 "/ideas",
+                "/ideas --list",
                 "/idea-resurface",
                 "/inspiration",
             ],
@@ -6476,6 +6508,10 @@ HELP_SECTION_TAXONOMY: OrderedDict[str, list[str]] = OrderedDict(
                 "/character-consistency",
                 "/world-consistency",
                 "/timeline-view",
+                "/rebuild-summaries",
+                "/rebuild-memory",
+                "/rebuild-memory full",
+                "/rebuild-memory single",
             ],
         ),
         (
@@ -6485,6 +6521,8 @@ HELP_SECTION_TAXONOMY: OrderedDict[str, list[str]] = OrderedDict(
                 "/research-scene",
                 "/research-apply",
                 "/research-integrity",
+                "/research",
+                "/research --world",
                 "/world-add",
             ],
         ),
@@ -6538,6 +6576,27 @@ def update_help_commands_from_handlers(command_handlers: dict[str, Callable[[str
     """Synchronize help-menu command list from active command handlers."""
     global ALL_COMMANDS
     ALL_COMMANDS = sorted(set(command_handlers.keys()), key=lambda item: (item.split()[0], item))
+
+
+def validate_help_taxonomy(command_handlers: dict[str, Callable[[str], None]]) -> None:
+    """Warn if help taxonomy and command handlers drift out of sync."""
+    taxonomy_commands: set[str] = set()
+    for commands in HELP_SECTION_TAXONOMY.values():
+        taxonomy_commands.update(commands)
+
+    handler_commands = set(command_handlers.keys())
+    missing_from_help = sorted(handler_commands - taxonomy_commands)
+    missing_from_handlers = sorted(command for command in taxonomy_commands if command != "exit" and command not in handler_commands)
+
+    if missing_from_help:
+        print("⚠️ Help taxonomy missing handler commands:")
+        for command_name in missing_from_help:
+            print(f"  - {command_name}")
+
+    if missing_from_handlers:
+        print("⚠️ Help taxonomy lists non-callable commands:")
+        for command_name in missing_from_handlers:
+            print(f"  - {command_name}")
 
 
 def command_matches_input(command_name: str, user_input: str) -> bool:
@@ -6642,7 +6701,12 @@ Use occasionally, not daily.
 → psychological behaviour audit
 
 /rebuild-memory
+or /rebuild-memory full
+or /rebuild-memory single
 → resynchronise canon memory after major rewrites
+
+/rebuild-summaries
+→ regenerate chapter summary artifacts after major chapter edits
 
 --------------------------------------------------
 
@@ -6659,6 +6723,9 @@ PHASE 6 — SCIENTIFIC REALISM ENGINE
 
 /research-integrity
 → detect contradictions across research topics
+
+/research --world
+→ world.txt plausibility and consistency audit
 
 --------------------------------------------------
 
@@ -6797,6 +6864,19 @@ Options:
 
 - rebuild single chapter
 - rebuild full novel.
+
+Explicit variants:
+
+- /rebuild-memory single
+- /rebuild-memory full
+
+---
+
+AFTER MAJOR CHAPTER TEXT EDITS WITHOUT MEMORY REBUILD NEED
+
+/rebuild-summaries
+
+Use to regenerate summary artifacts from chapter files.
 
 ---
 
@@ -6976,6 +7056,14 @@ WHEN CHECKING SCIENCE CONSISTENCY ACROSS RESEARCH
 /research-integrity
 
 Audits all research topics for contradictions.
+
+---
+
+WHEN AUDITING WORLDBUILDING PLAUSIBILITY FROM world.txt
+
+/research --world
+
+Runs world plausibility analysis against your project world file.
 
 ---
 
@@ -7267,16 +7355,20 @@ def main() -> None:
         "/chapter-summary": lambda command_text="": handle_chapter_summary(client),
         "/rebuild-summaries": lambda command_text="": handle_rebuild_summaries(client),
         "/rebuild-memory": lambda command_text="": handle_rebuild_memory(client, command_text),
+        "/rebuild-memory full": lambda command_text="": handle_rebuild_memory(client, command_text),
+        "/rebuild-memory single": lambda command_text="": handle_rebuild_memory(client, command_text),
         "/continuity-check": lambda command_text="": handle_continuity_check(client),
         "/book-integrity": lambda command_text="": handle_book_integrity(client),
         "/world-consistency": lambda command_text="": handle_world_consistency(client),
         "/character-consistency": lambda command_text="": handle_character_consistency(client),
         "/proofread": lambda command_text="": handle_proofread(client, command_text),
+        "/proofread nocopy": lambda command_text="": handle_proofread(client, command_text),
         "/research-topic": lambda command_text="": handle_research_topic(client),
         "/research-scene": lambda command_text="": handle_research_scene(client),
         "/research-apply": lambda command_text="": handle_research_apply(client),
         "/research-integrity": lambda command_text="": handle_research_integrity(client),
         "/research": lambda command_text="": handle_research(client, command_text),
+        "/research --world": lambda command_text="": handle_research(client, command_text),
         "/idea-resurface": lambda command_text="": handle_idea_resurface(client),
         "/inspiration": lambda command_text="": handle_inspiration(client),
         "/draft-pass": lambda command_text="": handle_draft_pass(client, command_text),
@@ -7306,6 +7398,7 @@ def main() -> None:
         "/help": lambda command_text="": print_help(),
     }
     update_help_commands_from_handlers(command_handlers)
+    validate_help_taxonomy(command_handlers)
     rebuild_help_descriptions()
 
     print_welcome()
