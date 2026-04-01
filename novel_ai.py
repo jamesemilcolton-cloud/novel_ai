@@ -6011,7 +6011,7 @@ def print_welcome() -> None:
 ALL_COMMANDS: list[str] = []
 
 
-COMMAND_HELP = {
+COMMAND_HELP_DETAILS = {
     "/scene-summary": """Purpose: Analyse a pasted scene and extract continuity-critical memory suggestions and story-state changes.
 Files read: Canon memory, recent scene summaries, screenplay source (if present), and user-pasted scene text.
 Files written: Canon memory, story state memory, scene summaries, and chapter files when user confirms updates.
@@ -6311,36 +6311,30 @@ When to use: When ending the current terminal session.""",
 }
 
 
+def _extract_when_to_use(help_text: str) -> str:
+    """Extract the 'When to use' guidance line from a help text block."""
+    for line in help_text.splitlines():
+        stripped = line.strip()
+        if stripped.lower().startswith("when to use:"):
+            return stripped.split(":", 1)[1].strip()
+    return ""
+
+
+COMMAND_DESCRIPTIONS: dict[str, str] = dict(COMMAND_HELP_DETAILS)
+COMMAND_WHEN: dict[str, str] = {
+    command_name: _extract_when_to_use(help_text)
+    for command_name, help_text in COMMAND_HELP_DETAILS.items()
+}
+
+
 def handle_help_describe() -> None:
-    """Interactively display static command documentation."""
-    print("COMMAND REFERENCE")
-    for index, command_name in enumerate(ALL_COMMANDS, start=1):
-        print(f"{index}. {command_name}")
-
-    try:
-        selection_text = input("\nSelect command number: ").strip()
-    except (EOFError, KeyboardInterrupt):
-        print("\nCancelled.")
-        return
-
-    if not selection_text.isdigit():
-        print("Invalid selection.")
-        return
-
-    selection_index = int(selection_text)
-    if selection_index < 1 or selection_index > len(ALL_COMMANDS):
-        print("Invalid selection.")
-        return
-
-    selected_command = ALL_COMMANDS[selection_index - 1]
-    description = COMMAND_HELP.get(selected_command)
-    if not description:
-        print("Description not available.")
-        return
-
+    """Show descriptions for all discovered commands."""
+    print("COMMAND DESCRIPTIONS")
     print()
-    print(selected_command)
-    print(description)
+    for command_name in ALL_COMMANDS:
+        print(command_name)
+        print(COMMAND_DESCRIPTIONS.get(command_name, "No description available"))
+        print()
 
 
 def _extract_help_generation_signals(command_func: Callable[..., Any]) -> dict[str, Any]:
@@ -6437,7 +6431,9 @@ HELP_COMMAND_DISCOVERY: OrderedDict[str, Callable[..., Any]] = OrderedDict()
 def rebuild_help_descriptions() -> None:
     """Rebuild generated static help descriptions from discovered command functions."""
     for command_name, command_func in HELP_COMMAND_DISCOVERY.items():
-        COMMAND_HELP[command_name] = _generate_system_introspection_help(command_func)
+        generated_help = _generate_system_introspection_help(command_func)
+        COMMAND_DESCRIPTIONS[command_name] = generated_help
+        COMMAND_WHEN[command_name] = _extract_when_to_use(generated_help)
 
 
 HELP_SECTION_ORDER: tuple[str, ...] = (
@@ -6557,19 +6553,79 @@ def _print_columns(items: list[str], width: int) -> None:
         print(line.rstrip())
 
 
-def print_help() -> None:
-    """Show available commands."""
-    terminal_width = shutil.get_terminal_size().columns
-    discovered_commands = set(ALL_COMMANDS + ["exit"])
+def _categorize_command(command_name: str) -> str:
+    """Categorize commands using rule-based keyword matching."""
+    lowered = command_name.lower()
+    category_rules: list[tuple[str, tuple[str, ...]]] = [
+        ("System", ("system", "stats", "state")),
+        ("Exports", ("export",)),
+        ("Drafting", ("draft",)),
+        ("Writing", ("proofread", "inspiration", "ideas")),
+        ("Continuity & Integrity", ("continuity", "consistency", "integrity", "rebuild")),
+        ("World", ("world", "research")),
+        ("Help & Workflow", ("help",)),
+    ]
+    for category, keywords in category_rules:
+        if any(keyword in lowered for keyword in keywords):
+            return category
+    return "Other"
 
+
+def _build_help_sections() -> OrderedDict[str, OrderedDict[str, list[str]]]:
+    """Build dynamic help sections from discovered command handlers."""
+    sections: OrderedDict[str, OrderedDict[str, list[str]]] = OrderedDict(
+        (section, OrderedDict()) for section in HELP_SECTION_ORDER
+    )
+    sections["Other"] = OrderedDict()
+
+    command_set = sorted(set(ALL_COMMANDS), key=lambda item: (item.split()[0], item))
+    for command_name in command_set:
+        pieces = command_name.split(maxsplit=1)
+        base_command = pieces[0]
+        variant = pieces[1] if len(pieces) > 1 else ""
+
+        category = _categorize_command(command_name)
+        category_map = sections.setdefault(category, OrderedDict())
+        category_map.setdefault(base_command, [])
+
+        if variant and base_command in command_set:
+            if variant not in category_map[base_command]:
+                category_map[base_command].append(variant)
+        elif command_name != base_command:
+            category_map.setdefault(command_name, [])
+
+    return sections
+
+
+def _print_dynamic_help_catalog(mode: str = "list") -> None:
+    """Print dynamic command catalog with optional description/when details."""
+    sections = _build_help_sections()
     print("=== NOVEL AI COMMANDS ===")
     print()
-    for section_title in HELP_SECTION_ORDER:
-        section_commands = HELP_SECTION_TAXONOMY.get(section_title, [])
-        commands = sorted(command for command in section_commands if command in discovered_commands)
+
+    for section_title, grouped_commands in sections.items():
+        if not grouped_commands:
+            continue
         print(f"[ {section_title} ]")
-        _print_columns(commands, terminal_width)
+        for base_command, variants in grouped_commands.items():
+            print(f"- {base_command}")
+            if mode == "describe":
+                print(f"    {COMMAND_DESCRIPTIONS.get(base_command, 'No description available')}")
+            elif mode == "when":
+                print(f"    {COMMAND_WHEN.get(base_command, '') or 'No usage guidance available'}")
+            for variant in sorted(variants):
+                full_variant_command = f"{base_command} {variant}"
+                print(f"  ├── {variant}")
+                if mode == "describe":
+                    print(f"      {COMMAND_DESCRIPTIONS.get(full_variant_command, 'No description available')}")
+                elif mode == "when":
+                    print(f"      {COMMAND_WHEN.get(full_variant_command, '') or 'No usage guidance available'}")
         print()
+
+
+def print_help() -> None:
+    """Show dynamically discovered command list."""
+    _print_dynamic_help_catalog(mode="list")
 
 
 def update_help_commands_from_handlers(command_handlers: dict[str, Callable[[str], None]]) -> None:
@@ -6579,24 +6635,8 @@ def update_help_commands_from_handlers(command_handlers: dict[str, Callable[[str
 
 
 def validate_help_taxonomy(command_handlers: dict[str, Callable[[str], None]]) -> None:
-    """Warn if help taxonomy and command handlers drift out of sync."""
-    taxonomy_commands: set[str] = set()
-    for commands in HELP_SECTION_TAXONOMY.values():
-        taxonomy_commands.update(commands)
-
-    handler_commands = set(command_handlers.keys())
-    missing_from_help = sorted(handler_commands - taxonomy_commands)
-    missing_from_handlers = sorted(command for command in taxonomy_commands if command != "exit" and command not in handler_commands)
-
-    if missing_from_help:
-        print("⚠️ Help taxonomy missing handler commands:")
-        for command_name in missing_from_help:
-            print(f"  - {command_name}")
-
-    if missing_from_handlers:
-        print("⚠️ Help taxonomy lists non-callable commands:")
-        for command_name in missing_from_handlers:
-            print(f"  - {command_name}")
+    """Retained for compatibility; dynamic help no longer depends on static taxonomy."""
+    del command_handlers
 
 
 def command_matches_input(command_name: str, user_input: str) -> bool:
@@ -6751,347 +6791,58 @@ Strategic commands only when necessary.
 
 =================================================="""
     )
+    print()
+    print("LIVE COMMAND INDEX")
+    _print_dynamic_help_catalog(mode="list")
 
 
 def handle_help_when() -> None:
-    """Show static command usage workflow guidance."""
-    print(
-        """==================================================
-NOVEL AI — COMMAND USAGE GUIDE
-
-CORE WRITING PRINCIPLE
-
-Write freely first.
-Use AI AFTER writing to stabilise story logic and memory.
-
----
-
-AFTER A WRITING SESSION
-
-/proofread
-
-Use to fix:
-
-- grammar
-- punctuation
-- strict UK spelling
-- novel paragraph/dialogue formatting
-
-Returns rewritten clean text, then a required CHANGES MADE summary, then required WRITING IMPROVEMENTS.
-Automatically copies clean text to clipboard (use /proofread nocopy to skip).
-
----
-
-AFTER WRITING AN IMPORTANT SCENE
-
-/scene-summary
-
-Use when:
-
-- major event occurs
-- new world rule appears
-- emotional turning point happens
-- character relationship shifts
-- mission situation changes
-
-Purpose:
-
-- extract canon facts
-- update story-state tracking
-- maintain continuity memory.
-
----
-
-BEFORE MOVING TO NEXT CHAPTER
-
-/continuity-check
-
-Use when:
-
-- finishing a chapter
-- unsure timeline still makes sense
-- risk of injury/location/world contradictions.
-
-Prevents narrative errors early.
-
----
-
-WHEN STORY DIRECTION FEELS UNCLEAR
-
-/recap
-
-Use to:
-
-- quickly remember current story situation
-- understand emotional tone
-- recall active threads.
-
----
-
-WHEN STORY FEELS STUCK
-
-/idea-resurface
-
-Use to:
-
-- rediscover stored ideas relevant to current story direction.
-
----
-
-WHEN WORLD RULES BECOME CONFIRMED
-
-/world-add
-
-Use to permanently lock:
-
-- technology limits
-- tone realism
-- political or social systems.
-
----
-
-AFTER MAJOR REWRITES
-
-/rebuild-memory
-
-Use when:
-
-- chapter heavily rewritten
-- character motivations changed
-- structural edits made.
-
-Options:
-
-- rebuild single chapter
-- rebuild full novel.
-
-Explicit variants:
-
-- /rebuild-memory single
-- /rebuild-memory full
-
----
-
-AFTER MAJOR CHAPTER TEXT EDITS WITHOUT MEMORY REBUILD NEED
-
-/rebuild-summaries
-
-Use to regenerate summary artifacts from chapter files.
-
----
-
-WHEN REVIEWING STORY PROGRESS
-
-/story-state
-
-Use to view:
-
-- active arcs
-- unresolved tensions
-- narrative pressure.
-
----
-
-WHEN CHECKING EVENT ORDER
-
-/timeline-view
-
-Use when:
-
-- events feel out of sequence
-- mission timeline unclear
-- long time gaps exist.
-
----
-
-WHEN REVIEWING A CHAPTER STRUCTURALLY
-
-/chapter-summary
-
-Use when:
-
-- chapter draft complete
-- preparing rewrite
-- checking pacing movement.
-
----
-
-WHEN CHECKING SCI-FI WORLD LOGIC
-
-/world-consistency
-
-Audits full novel for:
-
-- technology realism
-- environmental plausibility
-- scale drift.
-
----
-
-WHEN CHECKING CHARACTER BEHAVIOUR LOGIC
-
-/character-consistency
-
-Audits full novel for:
-
-- personality drift
-- motivation contradictions
-- psychological realism breaks.
-
----
-
-WHEN PERFORMING FOCUSED REVISION ANALYSIS
-
-/draft-pass
-
-Use when:
-
-- pacing weak
-- character unclear
-- tension low
-- clarity issues.
-
----
-
-WHEN SAVING SAFE MANUSCRIPT SNAPSHOTS
-
-/draft-save
-
-Creates recoverable draft version.
-
----
-
-WHEN VIEWING AVAILABLE DRAFTS
-
-/draft-list
-
-Shows stored manuscript versions.
-
----
-
-WHEN RESTORING OLD VERSION
-
-/draft-load
-
-Rolls manuscript back to previous snapshot.
-
----
-
-WHEN CHECKING WHOLE BOOK HEALTH
-
-/book-integrity
-
-Use when:
-
-- halfway through novel
-- finishing major arc
-- preparing for beta readers.
-
----
-
-WHEN BUILDING FULL MANUSCRIPT
-
-/build-book
-
-Combines all chapters into single readable document.
-
----
-
-WHEN EXPORTING PROFESSIONAL MANUSCRIPT
-
-/export-book --docx
-
-Use when:
-
-- sending to agents
-- sending to editors
-- beta reader distribution.
-
----
-
-WHEN STORING RAW IDEAS
-
-/ideas
-
-Use anytime inspiration occurs.
-
----
-
-WHEN VIEWING SAVED IDEAS
-
-/ideas --list
-
-Use to:
-
-- read all saved ideas as-is.
-
----
-
-WHEN PERFORMING SCIENTIFIC REALISM RESEARCH
-
-/research-topic
-
-Pure scientific research engine.
-
----
-
-WHEN TESTING SCIENCE REALISM IN A SCENE
-
-/research-scene
-
-Hard-sci-fi realism advisor.
-
----
-
-WHEN APPLYING SAVED SCIENCE TO A SCENE
-
-/research-apply
-
-Detect realism conflicts.
-
----
-
-WHEN CHECKING SCIENCE CONSISTENCY ACROSS RESEARCH
-
-/research-integrity
-
-Audits all research topics for contradictions.
-
----
-
-WHEN AUDITING WORLDBUILDING PLAUSIBILITY FROM world.txt
-
-/research --world
-
-Runs world plausibility analysis against your project world file.
-
----
-
-WHEN CHECKING SYSTEM HEALTH
-
-/system --health
-
-Diagnoses:
-
-- manuscript size risks
-- canon memory state
-- draft safety
-- performance risks.
-
----
-
-GOLDEN WRITING RHYTHM
-
-WRITE
-→ PROOFREAD
-→ SCENE SUMMARY
-→ CONTINUITY CHECK
-→ CONTINUE WRITING
-
-Strategic commands used only when necessary.
-
-=================================================="""
-    )
+    """Show per-command usage guidance for all discovered commands."""
+    print("=== NOVEL AI — WHEN TO USE COMMANDS ===")
+    print()
+    _print_dynamic_help_catalog(mode="when")
+
+
+def handle_help_generate(client: Any, command_text: str) -> None:
+    """Generate and persist command description and usage guidance for a command."""
+    requested_command = command_text.replace("/help --generate", "", 1).strip()
+    if not requested_command:
+        print("Usage: /help --generate <command>")
+        return
+    if requested_command not in ALL_COMMANDS:
+        print(f"Unknown command: {requested_command}")
+        return
+
+    messages = [
+        {
+            "role": "system",
+            "content": (
+                "Generate concise command documentation. Return exactly two lines:\n"
+                "DESCRIPTION: <text>\nWHEN: <text>"
+            ),
+        },
+        {"role": "user", "content": f"Command: {requested_command}"},
+    ]
+    try:
+        response = request_chat_completion(
+            client=client,
+            messages=messages,
+            temperature=0.2,
+            loading_message=f"Generating help for {requested_command}...",
+        )
+    except Exception as exc:
+        print(f"Help generation failed: {exc}")
+        return
+
+    description_match = re.search(r"^DESCRIPTION:\s*(.+)$", response, re.IGNORECASE | re.MULTILINE)
+    when_match = re.search(r"^WHEN:\s*(.+)$", response, re.IGNORECASE | re.MULTILINE)
+    if not description_match or not when_match:
+        print("Generation failed: invalid model output.")
+        return
+
+    COMMAND_DESCRIPTIONS[requested_command] = description_match.group(1).strip()
+    COMMAND_WHEN[requested_command] = when_match.group(1).strip()
+    print(f"Generated help saved for {requested_command}.")
 
 
 def handle_export_book(command_text: str = "") -> None:
@@ -7393,6 +7144,7 @@ def main() -> None:
         "/novel-stats": lambda command_text="": handle_novel_stats(),
         "/system --health": handle_system,
         "/help --describe": lambda command_text="": handle_help_describe(),
+        "/help --generate": lambda command_text="": handle_help_generate(client, command_text),
         "/help --workflow": lambda command_text="": handle_help_workflow(),
         "/help --when": lambda command_text="": handle_help_when(),
         "/help": lambda command_text="": print_help(),
