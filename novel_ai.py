@@ -171,6 +171,12 @@ SCORING RULES:
 - Scores are NOT general writing quality
 - Use full 0-10 range when warranted; avoid clustering around 6-8
 - Be honest and consistent
+- You must determine whether each category is present in the user's text.
+- If a category is not present:
+  - mark it as N/A
+  - do not analyse it
+  - do not include it in scoring
+- Do not guess or force analysis where none exists.
 
 -----------------------------------------------------
 
@@ -244,20 +250,20 @@ ALIGNMENT SCORES (0-10):
 PROSE: X/10
 - short explanation
 
-DIALOGUE: X/10
-- short explanation
+DIALOGUE: X/10 or N/A
+- short explanation (for N/A use reason like "no dialogue present")
 
-DESCRIPTION: X/10
-- short explanation
+DESCRIPTION: X/10 or N/A
+- short explanation (for N/A include reason)
 
 PACING: X/10
 - short explanation
 
-TENSION: X/10
-- short explanation
+TENSION: X/10 or N/A
+- short explanation (for N/A include reason)
 
-DEVICES: X/10
-- short explanation
+DEVICES: X/10 or N/A
+- short explanation (for N/A use reason like "no structural devices used")
 
 ---
 
@@ -265,7 +271,7 @@ OVERALL ALIGNMENT:
 
 X.X / 10
 
-This is an average of category scores.
+This is an average of numeric category scores only (ignore N/A categories).
 
 ---
 
@@ -286,6 +292,67 @@ EXAMPLES:
 - short quote from user text
 - explain technique (DO NOT rewrite)
 """
+
+INSPIRATION_DIALOGUE_MARKERS = ('"', "“", "”")
+INSPIRATION_DEVICES_MARKERS = (
+    "epigraph",
+    "journal entry",
+    "log entry",
+    "transcript",
+    "interlude",
+    "appendix",
+    "footnote",
+    "[",
+    "]",
+    "***",
+    "---",
+)
+INSPIRATION_SENSORY_TERMS = (
+    "saw",
+    "seen",
+    "looked",
+    "glow",
+    "dark",
+    "light",
+    "heard",
+    "sound",
+    "noise",
+    "silent",
+    "smell",
+    "scent",
+    "taste",
+    "felt",
+    "cold",
+    "hot",
+    "warm",
+    "rough",
+    "smooth",
+    "wind",
+    "rain",
+    "dust",
+    "air",
+    "room",
+    "street",
+    "forest",
+    "metal",
+)
+INSPIRATION_TENSION_TERMS = (
+    "risk",
+    "danger",
+    "threat",
+    "deadline",
+    "urgent",
+    "uncertain",
+    "if",
+    "might",
+    "could",
+    "afraid",
+    "fear",
+    "pressure",
+    "stakes",
+    "before",
+    "or else",
+)
 
 RESEARCH_SCENE_SYSTEM_PROMPT = """You are a hard-science realism consultant.
 
@@ -4595,6 +4662,43 @@ def load_structured_inspiration_data() -> dict[str, str]:
     return combined
 
 
+def detect_inspiration_categories(user_text: str) -> dict[str, tuple[bool, str]]:
+    """Heuristically detect which inspiration categories are present in user text."""
+    lowered = user_text.lower()
+    lines = [line.strip() for line in user_text.splitlines() if line.strip()]
+    words = re.findall(r"[A-Za-z']+", lowered)
+    word_set = set(words)
+
+    has_dialogue = any(marker in user_text for marker in INSPIRATION_DIALOGUE_MARKERS)
+
+    has_devices = False
+    if any(marker in lowered for marker in INSPIRATION_DEVICES_MARKERS):
+        has_devices = True
+    if any(re.match(r"^[A-Z][A-Z ]{2,}:\s+", line) for line in lines):
+        has_devices = True
+
+    has_description = any(term in word_set for term in INSPIRATION_SENSORY_TERMS)
+
+    has_tension = any(term in lowered for term in INSPIRATION_TENSION_TERMS)
+    if "?" in user_text:
+        has_tension = True
+
+    return {
+        "prose": (True, "always present"),
+        "dialogue": (has_dialogue, "quotation marks detected" if has_dialogue else "no dialogue present"),
+        "description": (
+            has_description,
+            "environment or sensory detail detected" if has_description else "little to no sensory/environmental detail detected",
+        ),
+        "pacing": (True, "always present (sentence structure)"),
+        "tension": (
+            has_tension,
+            "stakes/uncertainty/pressure detected" if has_tension else "no clear stakes, uncertainty, or pressure detected",
+        ),
+        "devices": (has_devices, "structural devices detected" if has_devices else "no structural devices used"),
+    }
+
+
 def handle_inspiration(client: Any) -> None:
     """Compare user scene techniques against structured inspirations grouped by category."""
     print("Paste your scene. Type END on a new line when finished.")
@@ -4607,9 +4711,18 @@ def handle_inspiration(client: Any) -> None:
     if all(not section.strip() for section in combined.values()):
         print("No inspiration data found.")
         return
+    category_presence = detect_inspiration_categories(user_text)
+    category_presence_block = "\n".join(
+        f"- {name.upper()}: {'present' if present else 'not present'} ({reason})"
+        for name, (present, reason) in category_presence.items()
+    )
 
     user_payload = (
         "Analyze the user's writing against the structured inspiration sections.\n\n"
+        "Use the provided category presence detection before scoring.\n"
+        "Only score categories marked present.\n\n"
+        "DETECTED CATEGORY PRESENCE:\n"
+        f"{category_presence_block}\n\n"
         f"USER TEXT:\n{user_text}\n\n"
         f"PROSE TECHNIQUES:\n{combined['prose'] or '(none)'}\n\n"
         f"DIALOGUE TECHNIQUES:\n{combined['dialogue'] or '(none)'}\n\n"
