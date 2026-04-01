@@ -4,6 +4,7 @@ import os
 import re
 import inspect
 import math
+import json
 import shutil
 import subprocess
 import sys
@@ -49,6 +50,7 @@ IDEAS_PATH = PROJECT_MEMORY_DIR / "ideas.txt"
 WORLD_RULES_PATH = PROJECT_MEMORY_DIR / "world.txt"
 STORY_STATE_PATH = PROJECT_MEMORY_DIR / "story_state.txt"
 TIMELINE_THREADS_PATH = PROJECT_MEMORY_DIR / "timeline_threads.txt"
+HELP_DESCRIPTIONS_PATH = PROJECT_MEMORY_DIR / "help_descriptions.json"
 CHAPTER_FILENAME_PATTERN = re.compile(r"chapter_(\d+)\.txt$")
 SUGGESTION_PATTERN = re.compile(
     r"^\s*(\d+)\.\s*(.+?)\s*(?:→|->)\s*\[([^\]]+)\]\s*$",
@@ -6327,13 +6329,69 @@ COMMAND_WHEN: dict[str, str] = {
 }
 
 
+def _load_persistent_help_descriptions() -> tuple[dict[str, str], dict[str, str]]:
+    """Safely load persisted help descriptions/when guidance from JSON storage."""
+    if not HELP_DESCRIPTIONS_PATH.exists():
+        return {}, {}
+
+    try:
+        with HELP_DESCRIPTIONS_PATH.open("r", encoding="utf-8") as handle:
+            payload = json.load(handle)
+    except (OSError, json.JSONDecodeError, TypeError, ValueError):
+        return {}, {}
+
+    if not isinstance(payload, dict):
+        return {}, {}
+
+    descriptions_raw = payload.get("descriptions", {})
+    when_raw = payload.get("when", {})
+
+    descriptions = (
+        {str(key): str(value) for key, value in descriptions_raw.items()}
+        if isinstance(descriptions_raw, dict)
+        else {}
+    )
+    when = (
+        {str(key): str(value) for key, value in when_raw.items()}
+        if isinstance(when_raw, dict)
+        else {}
+    )
+    return descriptions, when
+
+
+def _save_persistent_help_descriptions() -> None:
+    """Safely persist help descriptions/when guidance to JSON storage."""
+    payload = {
+        "descriptions": COMMAND_DESCRIPTIONS,
+        "when": COMMAND_WHEN,
+    }
+    try:
+        HELP_DESCRIPTIONS_PATH.parent.mkdir(parents=True, exist_ok=True)
+        temp_path = HELP_DESCRIPTIONS_PATH.with_suffix(".json.tmp")
+        with temp_path.open("w", encoding="utf-8") as handle:
+            json.dump(payload, handle, ensure_ascii=False, indent=2)
+        temp_path.replace(HELP_DESCRIPTIONS_PATH)
+    except OSError:
+        return
+
+
+_persisted_descriptions, _persisted_when = _load_persistent_help_descriptions()
+COMMAND_DESCRIPTIONS.update(_persisted_descriptions)
+COMMAND_WHEN.update(_persisted_when)
+
+
 def handle_help_describe() -> None:
     """Show descriptions for all discovered commands."""
     print("COMMAND DESCRIPTIONS")
     print()
     for command_name in ALL_COMMANDS:
         print(command_name)
-        print(COMMAND_DESCRIPTIONS.get(command_name, "No description available"))
+        print(
+            COMMAND_DESCRIPTIONS.get(
+                command_name,
+                "No description available.\nRun: /help --generate <command>",
+            )
+        )
         print()
 
 
@@ -6554,8 +6612,16 @@ def _print_columns(items: list[str], width: int) -> None:
 
 
 def _categorize_command(command_name: str) -> str:
-    """Categorize commands using rule-based keyword matching."""
+    """Categorize commands by exact match first, then keyword matching, then fallback."""
     lowered = command_name.lower()
+    exact_command_category: dict[str, str] = {}
+    for category_name, commands in HELP_SECTION_TAXONOMY.items():
+        for known_command in commands:
+            exact_command_category[known_command.lower()] = category_name
+
+    if lowered in exact_command_category:
+        return exact_command_category[lowered]
+
     category_rules: list[tuple[str, tuple[str, ...]]] = [
         ("System", ("system", "stats", "state")),
         ("Exports", ("export",)),
@@ -6579,6 +6645,7 @@ def _build_help_sections() -> OrderedDict[str, OrderedDict[str, list[str]]]:
     sections["Other"] = OrderedDict()
 
     command_set = sorted(set(ALL_COMMANDS), key=lambda item: (item.split()[0], item))
+    command_lookup = set(command_set)
     for command_name in command_set:
         pieces = command_name.split(maxsplit=1)
         base_command = pieces[0]
@@ -6586,13 +6653,13 @@ def _build_help_sections() -> OrderedDict[str, OrderedDict[str, list[str]]]:
 
         category = _categorize_command(command_name)
         category_map = sections.setdefault(category, OrderedDict())
-        category_map.setdefault(base_command, [])
-
-        if variant and base_command in command_set:
+        if variant and f"{base_command} {variant}" == command_name and base_command in command_lookup:
+            category_map.setdefault(base_command, [])
             if variant not in category_map[base_command]:
                 category_map[base_command].append(variant)
-        elif command_name != base_command:
-            category_map.setdefault(command_name, [])
+            continue
+
+        category_map.setdefault(command_name, [])
 
     return sections
 
@@ -6610,16 +6677,40 @@ def _print_dynamic_help_catalog(mode: str = "list") -> None:
         for base_command, variants in grouped_commands.items():
             print(f"- {base_command}")
             if mode == "describe":
-                print(f"    {COMMAND_DESCRIPTIONS.get(base_command, 'No description available')}")
+                print(
+                    "    "
+                    + COMMAND_DESCRIPTIONS.get(
+                        base_command,
+                        "No description available.\nRun: /help --generate <command>",
+                    ).replace("\n", "\n    ")
+                )
             elif mode == "when":
-                print(f"    {COMMAND_WHEN.get(base_command, '') or 'No usage guidance available'}")
+                print(
+                    "    "
+                    + (
+                        COMMAND_WHEN.get(base_command, "")
+                        or "No usage guidance available.\nRun: /help --generate <command>"
+                    ).replace("\n", "\n    ")
+                )
             for variant in sorted(variants):
                 full_variant_command = f"{base_command} {variant}"
                 print(f"  ├── {variant}")
                 if mode == "describe":
-                    print(f"      {COMMAND_DESCRIPTIONS.get(full_variant_command, 'No description available')}")
+                    print(
+                        "      "
+                        + COMMAND_DESCRIPTIONS.get(
+                            full_variant_command,
+                            "No description available.\nRun: /help --generate <command>",
+                        ).replace("\n", "\n      ")
+                    )
                 elif mode == "when":
-                    print(f"      {COMMAND_WHEN.get(full_variant_command, '') or 'No usage guidance available'}")
+                    print(
+                        "      "
+                        + (
+                            COMMAND_WHEN.get(full_variant_command, "")
+                            or "No usage guidance available.\nRun: /help --generate <command>"
+                        ).replace("\n", "\n      ")
+                    )
         print()
 
 
@@ -6792,7 +6883,9 @@ Strategic commands only when necessary.
 =================================================="""
     )
     print()
-    print("LIVE COMMAND INDEX")
+    print("---")
+    print()
+    print("AVAILABLE COMMANDS (LIVE)")
     _print_dynamic_help_catalog(mode="list")
 
 
@@ -6842,6 +6935,7 @@ def handle_help_generate(client: Any, command_text: str) -> None:
 
     COMMAND_DESCRIPTIONS[requested_command] = description_match.group(1).strip()
     COMMAND_WHEN[requested_command] = when_match.group(1).strip()
+    _save_persistent_help_descriptions()
     print(f"Generated help saved for {requested_command}.")
 
 
